@@ -563,7 +563,32 @@ def evaluate_holdings(alerts: list["Alert"]) -> list[HoldingStatus]:
             continue
         price = float(df["Close"].iloc[-1])
         shares, cost = float(h["shares"]), float(h["avg_cost"])
-        stop, target = float(h["stop"]), float(h["target"])
+        df = get_history(sym)
+if df.empty:
+    continue
+price = float(df["Close"].iloc[-1])
+shares, cost = float(h["shares"]), float(h["avg_cost"])
+
+st = analyze_structure(df) if has_enough_data(df) else Structure([], [])
+
+# 如果用戶沒有填寫停損（填 0 或空白），系統自動用「最近前低支撐」計算！
+raw_stop = h.get("stop", 0)
+if not raw_stop or raw_stop <= 0:
+    sup = find_support(df, st)
+    if sup:
+        stop = sup[0] * (1 - STOP_BUFFER)  # 支撐下方 0.5% 緩衝
+    else:
+        stop = float(sma(df["Close"], 20).iloc[-1]) * 0.97  # 預設用 20MA 下方 3%
+else:
+    stop = float(raw_stop)
+
+# 如果用戶沒有填寫目標價（填 0 或空白），系統自動用「上方前頂」計算！
+raw_target = h.get("target", 0)
+if not raw_target or raw_target <= 0:
+    t_val, _ = find_target(df, st)
+    target = t_val if t_val else price * 1.20  # 預設至少看 20% 漲幅
+else:
+    target = float(raw_target)
         mv, cv = shares * price, shares * cost
         # 現價已高於目標價或已跌穿停損時，RRR 沒有意義，顯示 "-"
         rrr_now = (target - price) / (price - stop) if stop < price < target else None
