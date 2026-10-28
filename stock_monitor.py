@@ -468,54 +468,119 @@ class Alert:
 
 
 def evaluate_holdings(alerts: list[Alert]) -> list[HoldingStatus]:
-    results = []
+    # 0. 先將使用者輸入的 HOLDINGS 按照 symbol 進行分組與合併
+    aggregated = {}
     for h in HOLDINGS:
-        sym = h["symbol"]
+        sym = str(h.get("symbol", "")).strip().upper()
+        if not sym:
+            continue
+        shares = float(h.get("shares", 0))
+        cost = float(h.get("avg_cost", 0))
+        if shares <= 0 or cost <= 0:
+            continue
+            
+        is_lt = bool(h.get("is_long_term", False))
+        stop_input = float(h.get("stop", 0) or 0)
+        target_input = float(h.get("target", 0) or 0)
+        
+        if sym not in aggregated:
+            aggregated[sym] = {
+                "shares": 0.0,
+                "total_cost": 0.0,
+                "is_long_term": is_lt,
+                "stop": stop_input,
+                "target": target_input,
+            }
+        
+        # 累加股數與總成本（用於計算加權平均成本）
+        aggregated[sym]["shares"] += shares
+        aggregated[sym]["total_cost"] += shares * cost
+        # 如果其中一筆勾選了長線，整體視為長線
+        if is_lt:
+            aggregated[sym]["is_long_term"] = True
+        # 若有特別指定停損/目標價，可優先保留
+        if stop_input > 0:
+            aggregated[sym]["stop"] = stop_input
+        if target_input > 0:
+            aggregated[sym]["target"] = target_input
+
+    results: list[HoldingStatus] = []
+    
+    # 1. 逐一處理合併後的代號
+    for sym, data in aggregated.items():
+        shares = data["shares"]
+        avg_cost = data["total_cost"] / shares if shares > 0 else 0.0
+        is_lt = data["is_long_term"]
+        
         df = get_history(sym)
         if df.empty:
+            print(f"[警告] 持倉 {sym} 無價格資料，略過")
             continue
+            
         price = float(df["Close"].iloc[-1])
-        shares, cost = float(h["shares"]), float(h["avg_cost"])
-        is_lt = bool(h.get("is_long_term", False))
         st = analyze_structure(df) if has_enough_data(df) else Structure([], [])
 
-        raw_stop = h.get("stop", 0)
+        # 自動計算停損
+        raw_stop = data["stop"]
         if not raw_stop or raw_stop <= 0:
             sup = find_support(df, st)
-            stop = sup[0] * (1 - STOP_BUFFER) if sup else float(sma(df["Close"], 20).iloc[-1]) * 0.97
+            if sup:
+                stop = sup[0] * (1 - STOP_BUFFER)
+            else:
+                stop = float(sma(df["Close"], 20).iloc[-1]) * 0.97
         else:
             stop = float(raw_stop)
 
-        raw_target = h.get("target", 0)
+        # 自動計算目標價
+        raw_target = data["target"]
         if not raw_target or raw_target <= 0:
             t_val, _ = find_target(df, st)
             target = t_val if t_val else price * 1.20
         else:
             target = float(raw_target)
 
-        mv, cv = shares * price, shares * cost
+        mv, cv = shares * price, shares * avg_cost
         rrr_now = (target - price) / (price - stop) if stop < price < target else None
-        hs = HoldingStatus(sym, shares, cost, price, stop, target, mv, cv, mv - cv,
-                           (price / cost - 1) * 100, (price / stop - 1) * 100, rrr_now, is_lt)
+        
+        hs = HoldingStatus(
+            symbol=sym,
+            shares=shares,
+            avg_cost=avg_cost,
+            price=price,
+            stop=stop,
+            target=target,
+            market_value=mv,
+            cost_value=cv,
+            pnl=mv - cv,
+            pnl_pct=(price / avg_cost - 1) * 100 if avg_cost > 0 else 0.0,
+            dist_to_stop_pct=(price / stop - 1) * 100 if stop > 0 else 0.0,
+            rrr_now=rrr_now,
+            is_long_term=is_lt
+        )
 
-        # ⚠️ 若勾選長線投資（is_long_term），則略過短線停損與結構破壞警報！
+        # 賣出與風控警報（若未勾選長線投資）
         if not is_lt:
             if price <= stop:
-                alerts.append(Alert(f"stop:{sym}", "danger", f"⚠️ 停損警報 {sym}：現價 {price:.2f} 已跌穿停損 {stop:.2f}"))
+                alerts.append(Alert(f"stop:{sym}", "danger",
+                                    f"⚠️ 停損/賣出警報 {sym}：收市價 {price:.2f} 已跌穿停損/支撐 {stop:.2f}"))
             elif float(df["Low"].iloc[-1]) <= stop:
-                alerts.append(Alert(f"stoptouch:{sym}", "warn", f"⚠️ {sym} 盤中曾觸及停損 {stop:.2f}"))
+                alerts.append(Alert(f"stoptouch:{sym}", "warn",
+                                    f"⚠️ {sym} 盤中曾觸及停損 {stop:.2f}，但收市 {price:.2f} 仍守住"))
 
-            if has_enough_data(df) and st.lows and price < st.lows[-1].price and price > stop:
-                alerts.append(Alert(f"lowbreak:{sym}", "danger", f"⚠️ 結構破壞 {sym}：跌穿前低"))
+            if has_enough_data(df):
+                if st.lows and price < st.lows[-1].price and price > stop:
+                    alerts.append(Alert(f"lowbreak:{sym}", "danger",
+                                        f"⚠️ 結構破壞 {sym}：收市價 {price:.2f} 跌穿前低 {st.lows[-1].price:.2f}"))
 
         if price >= target:
-            alerts.append(Alert(f"target:{sym}", "info", f"🎯 {sym} 已達目標價 {target:.2f}"))
+            alerts.append(Alert(f"target:{sym}", "info",
+                                f"🎯 {sym} 已達目標價 {target:.2f}（現價 {price:.2f}）"))
 
         setup = gate_leveraged_setup(evaluate_buy_setup(sym, df))
         hs.setup = setup
         results.append(hs)
+        
     return results
-
 
 # ==========================================================================
 # 6. RUN ANALYSIS (網頁版專用聚合介面)
