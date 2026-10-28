@@ -27,7 +27,7 @@ import pandas as pd
 import requests
 import streamlit as st
 
-import stock_monitor_3 as sm
+import stock_monitor as sm
 
 SETTINGS_FILE = "settings.json"
 CACHE_TTL_SECONDS = 15 * 60   # 價格資料超過 15 分鐘自動重新抓取
