@@ -4,12 +4,12 @@
  📈 智慧股票監控與風控助理 — Streamlit 網頁版
 ==========================================================================
 
-本檔負責「介面」；所有策略邏輯都在同資料夾的 stock_monitor_3.py（分析引擎）。
+本檔負責「介面」；所有策略邏輯都在同資料夾的 stock_monitor.py（分析引擎）。
 兩個檔案必須放在同一個資料夾。
 
 【本機執行】
-    pip install -r requirements_3.txt
-    streamlit run streamlit_app_3.py
+    pip install -r requirements.txt
+    streamlit run streamlit_app.py
     → 瀏覽器開啟 http://localhost:8501
 """
 
