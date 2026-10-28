@@ -861,26 +861,9 @@ def ask_float(prompt: str, default: float) -> float:
         return default
 
 
-@dataclass
-class AnalysisResult:
-    """一次完整分析的結果：終端機版與 Streamlit 網頁版共用。"""
-    macro: MacroSnapshot
-    setups: list[BuySetup]
-    holdings: list[HoldingStatus]
-    levs: list[LevStatus]
-    alerts: list[Alert]
-    account: float
-    risk_pct: float
-
-
-def run_analysis(account: Optional[float] = None, risk_pct: Optional[float] = None) -> AnalysisResult:
-    """
-    執行全部策略邏輯並回傳結構化結果（不做任何 print / 推送）。
-    account / risk_pct 省略時使用 CONFIG 的 ACCOUNT_SIZE / MAX_RISK_PCT。
-    """
-    account = ACCOUNT_SIZE if account is None else account
-    risk_pct = MAX_RISK_PCT if risk_pct is None else risk_pct
+def run_once(args: argparse.Namespace) -> None:
     alerts: list[Alert] = []
+    print(f"\n執行時間：{dt.datetime.now():%Y-%m-%d %H:%M:%S}（資料為最新可得的日線收市價）")
 
     # 1) 大盤與宏觀
     macro = build_macro_snapshot()
@@ -916,46 +899,39 @@ def run_analysis(account: Optional[float] = None, risk_pct: Optional[float] = No
                                 f"⚠️ {l.symbol}：目前盤勢{reason}（{l.underlying} 20日波動率 {l.vol_underlying:.0%}，"
                                 f"穿越20MA {l.crosses} 次），槓桿 ETF 存在複利損耗風險，建議降低部位或轉換回一倍 ETF"))
 
-    # 5) 資金部位計算
-    for s in setups:
-        if s.valid:
-            s.sizing = calc_position(s.price, s.stop, s.target, account, risk_pct, s.symbol in LEVERAGED_MAP)
-            sz = s.sizing
-            alerts.append(Alert(f"buy:{s.symbol}", "opportunity",
-                                f"✅ 買入訊號 {s.symbol} @ {s.price:.2f}：{s.trigger}｜停損 {s.stop:.2f}｜"
-                                f"目標 {s.target:.2f}｜RRR {s.rrr:.2f}｜建議 {sz.shares} 股（金額 {money(sz.order_value)}，"
-                                f"最大虧損 {money(sz.risk_amount)}）"))
-    for h in holdings:  # 加碼訊號也附上部位建議
-        if h.setup and h.setup.valid and h.setup.sizing is None:
-            h.setup.sizing = calc_position(h.price, h.setup.stop, h.setup.target, account, risk_pct,
-                                           h.symbol in LEVERAGED_MAP)
-    return AnalysisResult(macro, setups, holdings, levs, alerts, account, risk_pct)
-
-
-def run_once(args: argparse.Namespace) -> None:
-    print(f"\n執行時間：{dt.datetime.now():%Y-%m-%d %H:%M:%S}（資料為最新可得的日線收市價）")
-    res = run_analysis()
-
-    # 互動模式：有買入訊號時，詢問總資金與單筆風險比例後重算部位（資料已快取，不會重複下載）
-    signals = [s for s in res.setups if s.valid]
+    # 5) 資金部位計算機
+    signals = [s for s in setups if s.valid]
+    account, risk_pct = ACCOUNT_SIZE, MAX_RISK_PCT
     if args.interactive and signals:
         print(f"\n偵測到 {len(signals)} 個買入訊號：{', '.join(s.symbol for s in signals)}")
         account = ask_float("請輸入總資金規模", ACCOUNT_SIZE)
         risk_pct = ask_float("請輸入單筆最大容忍虧損比例（例如 1 代表 1%）", MAX_RISK_PCT * 100) / 100
-        res = run_analysis(account, risk_pct)
+    for s in signals:
+        s.sizing = calc_position(s.price, s.stop, s.target, account, risk_pct, s.symbol in LEVERAGED_MAP)
+        sz = s.sizing
+        alerts.append(Alert(f"buy:{s.symbol}", "opportunity",
+                            f"✅ 買入訊號 {s.symbol} @ {s.price:.2f}：{s.trigger}｜停損 {s.stop:.2f}｜"
+                            f"目標 {s.target:.2f}｜RRR {s.rrr:.2f}｜建議 {sz.shares} 股（金額 {money(sz.order_value)}，"
+                            f"最大虧損 {money(sz.risk_amount)}）"))
+    for h in holdings:  # 加碼訊號也附上部位建議
+        if h.setup and h.setup.valid and h.setup.sizing is None:
+            h.setup.sizing = calc_position(h.price, h.setup.stop, h.setup.target, account, risk_pct,
+                                           h.symbol in LEVERAGED_MAP)
 
-    print_macro(res.macro)
-    print_scan(res.setups)
-    print_portfolio(res.holdings)
-    for h in res.holdings:
+    # 6) 輸出報表
+    print_macro(macro)
+    print_scan(setups)
+    print_portfolio(holdings)
+    for h in holdings:
         if h.setup and h.setup.valid and h.setup.sizing:
-            print(f"\n  💡 {h.symbol} 加碼建議部位（總資金 {money(res.account)}，單筆風險 {res.risk_pct:.2%}）：")
+            print(f"\n  💡 {h.symbol} 加碼建議部位（總資金 {money(account)}，單筆風險 {risk_pct:.2%}）：")
             print_sizing(h.setup.sizing, indent="     ")
-    print_alerts(res.alerts, res.levs)
+    print_alerts(alerts, levs)
 
+    # 7) 通知
     if args.notify:
         print()
-        push_alerts(res.alerts)
+        push_alerts(alerts)
 
 
 def main() -> None:

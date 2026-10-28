@@ -138,18 +138,24 @@ def holdings_to_df(holdings: list[dict]) -> pd.DataFrame:
 
 
 def clean_holdings(df: pd.DataFrame) -> list[dict]:
-    """把表格編輯器的內容整理成引擎使用的持倉清單；不完整的列直接略過。"""
+    """把表格編輯器的內容整理成引擎使用的持倉清單；允許 stop 與 target 留空。"""
     out = []
     for _, r in df.iterrows():
         sym = str(r["symbol"]).strip().upper() if pd.notna(r["symbol"]) else ""
-        if not sym or sym == "NAN":
+        if not sym or sym == "NONE" or sym == "NAN":
             continue
         try:
-            shares, cost, stop, target = (float(r[c]) for c in ("shares", "avg_cost", "stop", "target"))
+            shares = float(r["shares"])
+            cost = float(r["avg_cost"])
+            # 允許 stop / target 留空或為 None，若沒填則設為 0.0，交由後端自動計算
+            stop = float(r["stop"]) if pd.notna(r["stop"]) and str(r["stop"]).upper() != "NONE" else 0.0
+            target = float(r["target"]) if pd.notna(r["target"]) and str(r["target"]).upper() != "NONE" else 0.0
         except (TypeError, ValueError):
             continue
-        if any(pd.isna(v) for v in (shares, cost, stop, target)) or shares <= 0 or cost <= 0:
+            
+        if pd.isna(shares) or pd.isna(cost) or shares <= 0 or cost <= 0:
             continue
+            
         out.append({"symbol": sym, "shares": shares, "avg_cost": cost, "stop": stop, "target": target})
     return out
 
