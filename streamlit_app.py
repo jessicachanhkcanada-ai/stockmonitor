@@ -2,8 +2,8 @@
 """
 ==========================================================================
  📈 智慧股票監控與個人財務資產管理 — Streamlit 網頁版
- 支援 Telegram 設定、買點風險風控、手動持倉管理，
- 以及具備手動輸入年度收支、房貸動態模擬與淨資產追蹤的【🏠 房貸與財務管理】模組。
+ 支援 Telegram 設定、持倉風險自動分類與手動調整、帳戶類型標記 (TFSA/RRSP)、
+ 美加匯率自動換算、房貸動態模擬與淨資產追蹤。
 ==========================================================================
 """
 
@@ -25,7 +25,7 @@ import stock_monitor as sm
 
 SETTINGS_FILE = "settings.json"
 CACHE_TTL_SECONDS = 15 * 60
-HOLD_COLS = ["symbol", "shares", "avg_cost", "stop", "target", "is_long_term"]
+HOLD_COLS = ["symbol", "shares", "avg_cost", "stop", "target", "risk_level", "account_type", "is_long_term"]
 LEVEL_ORDER = {"danger": 0, "warn": 1, "opportunity": 2, "info": 3}
 
 st.set_page_config(page_title="智慧股票監控與風控助理", page_icon="📈", layout="wide")
@@ -116,7 +116,23 @@ def parse_watchlist(text: str) -> list[str]:
     return out
 
 
+def auto_detect_risk(sym: str) -> str:
+    sym = sym.upper()
+    if any(k in sym for k in ["SGOV", "CBIL", "CASH", "PSA"]):
+        return "低風險 (Low)"
+    elif any(k in sym for k in ["XEQT", "CM.TO", "XIU"]):
+        return "中風險 (Medium)"
+    else:
+        return "高風險 (High)"
+
+
 def holdings_to_df(holdings: list[dict]) -> pd.DataFrame:
+    for h in holdings:
+        if "risk_level" not in h or not h["risk_level"]:
+            h["risk_level"] = auto_detect_risk(h.get("symbol", ""))
+        if "account_type" not in h or not h["account_type"]:
+            h["account_type"] = "TFSA"
+            
     df = pd.DataFrame(holdings)
     for col in HOLD_COLS:
         if col not in df.columns:
@@ -124,13 +140,18 @@ def holdings_to_df(holdings: list[dict]) -> pd.DataFrame:
                 df[col] = False
             elif col in ["shares", "avg_cost", "stop", "target"]:
                 df[col] = 0.0
+            elif col == "risk_level":
+                df[col] = "高風險 (High)"
+            elif col == "account_type":
+                df[col] = "TFSA"
             else:
                 df[col] = ""
     df = df[HOLD_COLS]
     df["is_long_term"] = df["is_long_term"].fillna(False).astype(bool)
     return df.astype({
         "symbol": "object", "shares": "float64", "avg_cost": "float64",
-        "stop": "float64", "target": "float64", "is_long_term": "bool"
+        "stop": "float64", "target": "float64", "risk_level": "object",
+        "account_type": "object", "is_long_term": "bool"
     })
 
 
@@ -145,6 +166,8 @@ def clean_holdings(df: pd.DataFrame) -> list[dict]:
             cost = float(r["avg_cost"])
             stop = float(r["stop"]) if pd.notna(r["stop"]) and str(r["stop"]).upper() != "NONE" else 0.0
             target = float(r["target"]) if pd.notna(r["target"]) and str(r["target"]).upper() != "NONE" else 0.0
+            risk_level = str(r.get("risk_level", "高風險 (High)"))
+            account_type = str(r.get("account_type", "TFSA"))
             is_lt = bool(r.get("is_long_term", False)) if pd.notna(r.get("is_long_term")) else False
         except (TypeError, ValueError):
             continue
@@ -158,6 +181,8 @@ def clean_holdings(df: pd.DataFrame) -> list[dict]:
             "avg_cost": cost, 
             "stop": stop, 
             "target": target, 
+            "risk_level": risk_level,
+            "account_type": account_type,
             "is_long_term": is_lt
         })
     return out
@@ -212,16 +237,26 @@ def main() -> None:
                 else:
                     st.warning("請先填寫 Bot Token 與 Chat ID。")
 
-        with st.expander("💼 目前持倉（手動微調/預覽）", expanded=True):
+        with st.expander("💼 目前持倉（含風險與帳戶分類）", expanded=True):
             hold_df = st.data_editor(
                 holdings_to_df(cfg["holdings"]), num_rows="dynamic", key="holdings_editor",
                 column_config={
                     "symbol": st.column_config.TextColumn("代號"),
                     "shares": st.column_config.NumberColumn("股數", min_value=0.0, step=0.0001, format="%.4f"),
                     "avg_cost": st.column_config.NumberColumn("平均成本", min_value=0.0, format="%.2f"),
-                    "stop": st.column_config.NumberColumn("停損/支撐(留空自動算)", min_value=0.0, format="%.2f"),
+                    "stop": st.column_config.NumberColumn("停損價(留空自動算)", min_value=0.0, format="%.2f"),
                     "target": st.column_config.NumberColumn("目標價(留空自動算)", min_value=0.0, format="%.2f"),
-                    "is_long_term": st.column_config.CheckboxColumn("長線投資", default=False),
+                    "risk_level": st.column_config.SelectboxColumn(
+                        "風險等級", 
+                        options=["低風險 (Low)", "中風險 (Medium)", "高風險 (High)"],
+                        required=True
+                    ),
+                    "account_type": st.column_config.SelectboxColumn(
+                        "帳戶類型", 
+                        options=["TFSA", "RRSP", "Non-Registered"],
+                        required=True
+                    ),
+                    "is_long_term": st.column_config.CheckboxColumn("長線", default=False),
                 }
             )
 
@@ -256,8 +291,9 @@ def main() -> None:
     apply_to_engine(live_cfg)
 
     # ---------------- 主畫面與分析 ----------------
+    fx_current = sm.get_usdcad_rate()
     st.title("📈 智慧股票監控與個人財務資產管理")
-    st.caption("支援 Telegram 自動推播、技術分析、持倉風控，以及手動輸入的個人淨資產與房貸動態模擬。")
+    st.caption(f"支援 Telegram 背景排程推播、技術分析、持倉風控，以及美加匯率自動換算 (當前 USD/CAD 匯率: `{fx_current:.4f}` 統一以 CAD 結算)。")
 
     try:
         with st.spinner("正在分析大盤、觀察清單與持倉…"):
@@ -287,21 +323,21 @@ def main() -> None:
             with st.container():
                 icon = "✅" if setup.valid else "⏳"
                 rrr_val = setup.rrr if setup.rrr is not None else 0.0
-                expander_label = f"{icon} {setup.symbol} - 現價: {setup.price:.2f} | RRR: {rrr_val:.2f}"
+                expander_label = f"{icon} {setup.symbol} - 現價: {setup.price:.2f} CAD | RRR: {rrr_val:.2f}"
                 with st.expander(expander_label, expanded=setup.valid):
                     col1, col2, col3, col4 = st.columns(4)
                     col1.metric("觸發條件", setup.trigger if setup.trigger else "無")
-                    col2.metric("建議停損價", f"{setup.stop:.2f}" if setup.stop else "N/A")
-                    col3.metric("目標價", f"{setup.target:.2f}" if setup.target else "N/A")
+                    col2.metric("建議停損價", f"{setup.stop:.2f} CAD" if setup.stop else "N/A")
+                    col3.metric("目標價", f"{setup.target:.2f} CAD" if setup.target else "N/A")
                     col4.metric("RSI (14)", f"{setup.rsi:.1f}")
                     
                     st.markdown(f"**💡 判定原因 / 說明**：{setup.reason}")
                     
                     if setup.valid and setup.sizing:
-                        st.success(f"📌 **風控建議**：建議買入股數 `{setup.sizing.shares}` 股 | 下單金額 `$${setup.sizing.order_value:,.2f}` | 最大風險 `$${setup.sizing.risk_amount:,.2f}`")
+                        st.success(f"📌 **風控建議**：建議買入股數 `{setup.sizing.shares}` 股 | 下單金額 `$${setup.sizing.order_value:,.2f} CAD` | 最大風險 `$${setup.sizing.risk_amount:,.2f} CAD`")
         
     with t3:
-        st.subheader("💼 持倉綜合損益與風控（已自動跨 App 合併）")
+        st.subheader("💼 持倉綜合損益與風控（已自動換算為 CAD 合併）")
         rows = res.holdings
         if rows:
             tv = sum(r.market_value for r in rows)
@@ -309,9 +345,9 @@ def main() -> None:
             pnl = tv - tc
             
             c1, c2, c3 = st.columns(3)
-            c1.metric("總成本", f"${tc:,.2f}")
-            c2.metric("總市值", f"${tv:,.2f}")
-            c3.metric("未實現損益", f"${pnl:+,.2f}", f"{(tv / tc - 1) * 100:+.2f}%" if tc else None)
+            c1.metric("總成本 (CAD)", f"${tc:,.2f}")
+            c2.metric("總市值 (CAD)", f"${tv:,.2f}")
+            c3.metric("未實現損益 (CAD)", f"${pnl:+,.2f}", f"{(tv / tc - 1) * 100:+.2f}%" if tc else None)
             
             df_disp = pd.DataFrame([{
                 "代號": r.symbol,
@@ -323,6 +359,8 @@ def main() -> None:
                 "損益%": r.pnl_pct,
                 "自動停損價": r.stop,
                 "自動目標價": r.target,
+                "風險等級": r.risk_level,
+                "帳戶類型": r.account_type,
                 "長線資產": "是" if r.is_long_term else "否"
             } for r in rows])
             
@@ -349,10 +387,10 @@ def main() -> None:
                         color=alt.Color(field="Symbol", type="nominal", legend=alt.Legend(title="標的代號")),
                         tooltip=[
                             "Symbol", 
-                            alt.Tooltip("MarketValue", format="$,.2f", title="市值"), 
+                            alt.Tooltip("MarketValue", format="$,.2f", title="市值 (CAD)"), 
                             alt.Tooltip("Weight", format=".1f%", title="佔比")
                         ]
-                    ).properties(title="資產配置權重佔比 (Market Value)", height=320)
+                    ).properties(title="資產配置權重佔比 (Market Value in CAD)", height=320)
                     st.altair_chart(chart, use_container_width=True)
                     
                 with col_health:
@@ -399,13 +437,11 @@ def main() -> None:
             else:
                 st.warning(f"無法取得 {selected_sym} 的圖表資料。")
 
-    # ---------------- 🏠 6. 房貸與個人財務管理 (直接手動輸入年度收支總額) ----------------
     with t6:
         st.subheader("🏠 房貸追蹤與年度收支手動填寫")
-        st.caption("您可以隨時在此直接更新您截至目前的年度總收入與總支出金額，系統會自動換算每月平均並更新儲蓄率與淨資產。")
+        st.caption("您可以隨時在此更新年度總收入與總支出，系統會自動換算每月平均、儲蓄率並與美加換算後的股票資產合併計算淨資產。")
         
-        # --- 1. 手動輸入年度收支總額區塊 ---
-        st.markdown("### 📊 年度收支快速輸入 (Annual Income & Expense)")
+        st.markdown("### 📊 年度收支快速輸入 (Annual Income & Expense in CAD)")
         col_in_man, col_ex_man, col_save_btn = st.columns([1.5, 1.5, 1])
         
         with col_in_man:
@@ -414,7 +450,7 @@ def main() -> None:
             manual_annual_exp = st.number_input("今年累積總支出 (CAD，含房貸)", value=float(cfg.get("annual_expense_manual", 92860.0)), step=1000.0, key="man_exp")
             
         with col_save_btn:
-            st.write("") # 對齊排版
+            st.write("")
             if st.button("💾 儲存收支數據"):
                 cfg["annual_income_manual"] = manual_annual_inc
                 cfg["annual_expense_manual"] = manual_annual_exp
@@ -425,7 +461,6 @@ def main() -> None:
                 else:
                     st.error(f"儲存失敗：{err}")
 
-        # 計算每月平均與儲蓄率
         m_inc = manual_annual_inc / 12.0
         m_exp = manual_annual_exp / 12.0
         m_surplus = m_inc - m_exp
@@ -440,7 +475,6 @@ def main() -> None:
 
         st.markdown("---")
 
-        # --- 2. 房貸試算與淨資產 ---
         col_m1, col_m2 = st.columns(2)
         
         with col_m1:
@@ -462,20 +496,19 @@ def main() -> None:
             )
 
         with col_m2:
-            st.markdown("### 💰 全面淨資產總覽 (Net Worth)")
+            st.markdown("### 💰 全面淨資產總覽 (Net Worth in CAD)")
             total_stock_value = sum(r.market_value for r in res.holdings) if res.holdings else 0.0
             cash_savings = st.number_input("現金與高利活存/緊急預備金 (CAD)", value=float(cfg.get("cash_savings", 50000.0)), step=5000.0, key="c_sav")
             
             total_assets = total_stock_value + cash_savings
             net_worth = total_assets - mortgage_principal
             
-            st.metric("總資產 (股票持倉 + 現金)", f"CAD ${total_assets:,.2f}")
+            st.metric("總資產 (換算CAD美加股票 + 現金)", f"CAD ${total_assets:,.2f}")
             st.metric("總負債 (房貸本金)", f"CAD ${mortgage_principal:,.2f}", delta="-負債", delta_color="inverse")
             st.metric("預估個人淨資產 (Net Worth)", f"CAD ${net_worth:,.2f}", delta="安全防線")
 
         st.markdown("---")
         
-        # --- 3. 20 / 40 / 40 資產配置目標對照 ---
         st.markdown("### 🎯 資產配置與風險目標對照 (20 / 40 / 40 比例)")
         low_target = total_assets * 0.20
         med_target = total_assets * 0.40

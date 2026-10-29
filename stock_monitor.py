@@ -3,7 +3,7 @@
 """
 ==========================================================================
  股票與 ETF 智慧監控與風控助理 (後端引擎)
- 支援跨 App 庫存加權合併、觀察清單自動掃描與 Telegram 安全推播
+ 支援 USD 自動轉 CAD 匯率換算、跨 App 庫存加權合併與安全推播
 ==========================================================================
 """
 
@@ -55,6 +55,17 @@ LEV_VOL_WARN = 0.30
 LEV_CROSS_WARN = 3
 
 _HISTORY_CACHE: dict[tuple[str, str], pd.DataFrame] = {}
+
+
+def get_usdcad_rate() -> float:
+    """自動取得當前 USD/CAD 即時匯率，若失敗則回傳保底值 1.35"""
+    try:
+        df_fx = yf.Ticker("USDCAD=X").history(period="1d")
+        if df_fx is not None and not df_fx.empty:
+            return float(df_fx["Close"].iloc[-1])
+    except Exception:
+        pass
+    return 1.35
 
 
 def get_history(symbol: str, period: str = "1y") -> pd.DataFrame:
@@ -228,6 +239,7 @@ def send_telegram_alert(message: str) -> None:
 
 
 def scan_setups(account_size: float, risk_pct: float, alerts: list[Alert]) -> list[BuySetup]:
+    fx = get_usdcad_rate()
     setups = []
     for sym in WATCHLIST:
         df = get_history(sym)
@@ -235,7 +247,9 @@ def scan_setups(account_size: float, risk_pct: float, alerts: list[Alert]) -> li
             setups.append(BuySetup(symbol=sym, valid=False, reason="歷史資料不足 60 根 K 線"))
             continue
             
-        price = float(df["Close"].iloc[-1])
+        # 若為美股自動轉為 CAD 計算
+        fx_mult = fx if not (sym.endswith(".TO") or sym.endswith(".V")) else 1.0
+        price = float(df["Close"].iloc[-1]) * fx_mult
         st = analyze_structure(df)
         r = float(rsi(df["Close"]).iloc[-1])
         
@@ -244,18 +258,22 @@ def scan_setups(account_size: float, risk_pct: float, alerts: list[Alert]) -> li
         
         if sup is None:
             sma20 = float(sma(df["Close"], 20).iloc[-1])
-            sup_price = sma20 * 0.98
+            sup_price = sma20 * 0.98 * fx_mult
             sup_lbl = "20日均線附近"
         else:
             sup_price, sup_lbl = sup
+            sup_price *= fx_mult
+            
+        if tgt:
+            tgt *= fx_mult
             
         stop = sup_price * (1 - STOP_BUFFER)
         
         risk_dist = price - stop
-        reward_dist = tgt - price
-        rrr = reward_dist / risk_dist if risk_dist > 0 else 0.0
+        reward_dist = tgt - price if tgt else 0
+        rrr = reward_dist / risk_dist if risk_dist > 0 and risk_dist else 0.0
         
-        is_uptrend = st.uptrend or (price >= float(sma(df["Close"], 20).iloc[-1]))
+        is_uptrend = st.uptrend or (price >= float(sma(df["Close"], 20).iloc[-1]) * fx_mult)
         is_near_support = (price - sup_price) / sup_price <= SUPPORT_TOLERANCE * 1.5
         
         valid = is_uptrend and is_near_support and (rrr >= MIN_RRR)
@@ -278,13 +296,13 @@ def scan_setups(account_size: float, risk_pct: float, alerts: list[Alert]) -> li
             hard_stop_2pct=price * 0.98
         )
         
-        reason_text = f"回調至{sup_lbl} {sup_price:.2f}，RRR 達 {rrr:.2f}，結構健康符合買入條件" if valid else f"目前價格未緊貼支撐或 RRR ({rrr:.2f}) 未達門檻"
+        reason_text = f"回調至{sup_lbl} {sup_price:.2f} CAD，RRR 達 {rrr:.2f}" if valid else f"目前價格未緊貼支撐或 RRR ({rrr:.2f}) 未達門檻"
         
         setup_obj = BuySetup(
             symbol=sym,
             valid=valid,
             price=price,
-            trigger=f"回調至{sup_lbl} {sup_price:.2f}",
+            trigger=f"回調至{sup_lbl} {sup_price:.2f} CAD",
             support=sup_price,
             stop=stop,
             target=tgt,
@@ -293,12 +311,6 @@ def scan_setups(account_size: float, risk_pct: float, alerts: list[Alert]) -> li
             rsi=r,
             sizing=sizing
         )
-        
-        if valid:
-            alert_text = f"🟢 【買點訊號】觀察清單中的 `{sym}` 現價已回調至支撐位，符合買入條件 (RRR: {rrr:.2f})。"
-            alerts.append(Alert(f"setup:{sym}", "opportunity", alert_text))
-            # 修正：網頁開啟時不自動發送 Telegram 訊息，由背景腳本 cron_monitor.py 負責發送
-
         setups.append(setup_obj)
     return setups
 
@@ -329,6 +341,7 @@ class Alert:
 
 
 def evaluate_holdings(alerts: list[Alert]) -> list[HoldingStatus]:
+    fx = get_usdcad_rate()
     aggregated = {}
     for h in HOLDINGS:
         sym = str(h.get("symbol", "")).strip().upper()
@@ -366,18 +379,21 @@ def evaluate_holdings(alerts: list[Alert]) -> list[HoldingStatus]:
         if df.empty:
             continue
             
-        price = float(df["Close"].iloc[-1])
+        # 判斷幣別並自動換算為 CAD
+        fx_mult = fx if not (sym.endswith(".TO") or sym.endswith(".V")) else 1.0
+        
+        price = float(df["Close"].iloc[-1]) * fx_mult
         st = analyze_structure(df) if has_enough_data(df) else Structure([], [])
 
-        stop = data["stop"]
+        stop = data["stop"] * fx_mult if data["stop"] > 0 else 0
         if not stop or stop <= 0:
             sup = find_support(df, st)
-            stop = sup[0] * (1 - STOP_BUFFER) if sup else float(sma(df["Close"], 20).iloc[-1]) * 0.97
+            stop = (sup[0] * (1 - STOP_BUFFER) if sup else float(sma(df["Close"], 20).iloc[-1]) * 0.97) * fx_mult
 
-        target = data["target"]
+        target = data["target"] * fx_mult if data["target"] > 0 else 0
         if not target or target <= 0:
             t_val, _ = find_target(df, st)
-            target = t_val if t_val else price * 1.20
+            target = (t_val if t_val else price * 1.20) * fx_mult
 
         mv, cv = shares * price, shares * avg_cost
         rrr_now = (target - price) / (price - stop) if stop < price < target else None
@@ -391,9 +407,8 @@ def evaluate_holdings(alerts: list[Alert]) -> list[HoldingStatus]:
         )
 
         if not is_lt and price <= stop:
-            alert_text = f"⚠️ 【停損警報】持倉標的 `{sym}` 現價已跌破預設停損價，請前往 App 確認。"
+            alert_text = f"⚠️ 【停損警報】持倉標的 `{sym}` 現價已跌破預設停損價。"
             alerts.append(Alert(f"stop:{sym}", "danger", alert_text))
-            # 修正：網頁開啟時不自動發送 Telegram 訊息，由背景腳本 cron_monitor.py 負責發送
 
         results.append(hs)
         
