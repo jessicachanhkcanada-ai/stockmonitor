@@ -211,9 +211,6 @@ def find_target(df: pd.DataFrame, st: Structure) -> tuple[Optional[float], str]:
 
 
 def send_telegram_alert(message: str) -> None:
-    """
-    透過 Telegram Bot 發送去敏感化的安全通知 (單向通知)
-    """
     try:
         token = os.getenv("TELEGRAM_BOT_TOKEN")
         chat_id = os.getenv("TELEGRAM_CHAT_ID")
@@ -231,9 +228,6 @@ def send_telegram_alert(message: str) -> None:
 
 
 def scan_setups(account_size: float, risk_pct: float, alerts: list[Alert]) -> list[BuySetup]:
-    """
-    自動掃描觀察清單 (WATCHLIST) 中的標的，計算回調支撐、停損與 RRR 買點
-    """
     setups = []
     for sym in WATCHLIST:
         df = get_history(sym)
@@ -284,6 +278,8 @@ def scan_setups(account_size: float, risk_pct: float, alerts: list[Alert]) -> li
             hard_stop_2pct=price * 0.98
         )
         
+        reason_text = f"回調至{sup_lbl} {sup_price:.2f}，RRR 達 {rrr:.2f}，結構健康符合買入條件" if valid else f"目前價格未緊貼支撐或 RRR ({rrr:.2f}) 未達門檻"
+        
         setup_obj = BuySetup(
             symbol=sym,
             valid=valid,
@@ -293,7 +289,7 @@ def scan_setups(account_size: float, risk_pct: float, alerts: list[Alert]) -> li
             stop=stop,
             target=tgt,
             rrr=rrr,
-            reason="符合多頭回調支撐與 RRR 要求" if valid else "目前價格未緊貼支撐或 RRR 未達門檻",
+            reason=reason_text,
             rsi=r,
             sizing=sizing
         )
