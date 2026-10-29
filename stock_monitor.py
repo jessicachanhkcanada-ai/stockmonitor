@@ -3,7 +3,7 @@
 """
 ==========================================================================
  股票與 ETF 智慧監控與風控助理 (後端引擎)
- 支援同代號跨 App 自動加權平均合併
+ 支援跨 App 庫存加權合併、觀察清單自動掃描與 Telegram 安全推播
 ==========================================================================
 """
 
@@ -159,16 +159,14 @@ class MacroSnapshot:
     fear_greed: Optional[float]
     fg_source: str
     indices: list[IndexStatus] = field(default_factory=list)
-    regime: str = "未知"
+    regime: str = "多頭（偏好順勢回調買入）"
     panic_score: int = 0
     panic_hits: list[str] = field(default_factory=list)
     panic_alert: bool = False
 
 
 def build_macro_snapshot() -> MacroSnapshot:
-    snap = MacroSnapshot(None, None, 50.0, "預設")
-    snap.regime = "多頭（偏好順勢回調買入）"
-    return snap
+    return MacroSnapshot(None, None, 50.0, "預設")
 
 
 @dataclass
@@ -209,7 +207,104 @@ def find_target(df: pd.DataFrame, st: Structure) -> tuple[Optional[float], str]:
     above = [s for s in st.highs if s.price > price * 1.005]
     if above:
         return above[-1].price, "前頂"
-    return None, "上方無前頂"
+    return price * 1.15, "上方預設目標價 (+15%)"
+
+
+def send_telegram_alert(message: str) -> None:
+    """
+    透過 Telegram Bot 發送去敏感化的安全通知 (單向通知)
+    """
+    try:
+        token = os.getenv("TELEGRAM_BOT_TOKEN")
+        chat_id = os.getenv("TELEGRAM_CHAT_ID")
+        if not token or not chat_id:
+            return
+        url = f"https://api.telegram.org/bot{token}/sendMessage"
+        payload = {
+            "chat_id": chat_id,
+            "text": message,
+            "parse_mode": "Markdown"
+        }
+        requests.post(url, json=payload, timeout=5)
+    except Exception as exc:
+        print(f"[警告] 發送 Telegram 警報失敗: {exc}")
+
+
+def scan_setups(account_size: float, risk_pct: float, alerts: list[Alert]) -> list[BuySetup]:
+    """
+    自動掃描觀察清單 (WATCHLIST) 中的標的，計算回調支撐、停損與 RRR 買點
+    """
+    setups = []
+    for sym in WATCHLIST:
+        df = get_history(sym)
+        if not has_enough_data(df):
+            setups.append(BuySetup(symbol=sym, valid=False, reason="歷史資料不足 60 根 K 線"))
+            continue
+            
+        price = float(df["Close"].iloc[-1])
+        st = analyze_structure(df)
+        r = float(rsi(df["Close"]).iloc[-1])
+        
+        sup = find_support(df, st)
+        tgt, tgt_lbl = find_target(df, st)
+        
+        if sup is None:
+            sma20 = float(sma(df["Close"], 20).iloc[-1])
+            sup_price = sma20 * 0.98
+            sup_lbl = "20日均線附近"
+        else:
+            sup_price, sup_lbl = sup
+            
+        stop = sup_price * (1 - STOP_BUFFER)
+        
+        risk_dist = price - stop
+        reward_dist = tgt - price
+        rrr = reward_dist / risk_dist if risk_dist > 0 else 0.0
+        
+        is_uptrend = st.uptrend or (price >= float(sma(df["Close"], 20).iloc[-1]))
+        is_near_support = (price - sup_price) / sup_price <= SUPPORT_TOLERANCE * 1.5
+        
+        valid = is_uptrend and is_near_support and (rrr >= MIN_RRR)
+        
+        risk_amt = account_size * risk_pct
+        shares = int(risk_amt / risk_dist) if risk_dist > 0 else 0
+        order_val = shares * price
+        
+        max_pos_val = account_size * MAX_POSITION_PCT
+        if order_val > max_pos_val:
+            shares = int(max_pos_val / price) if price > 0 else 0
+            order_val = shares * price
+            
+        sizing = Sizing(
+            shares=shares,
+            order_value=order_val,
+            risk_amount=shares * risk_dist if risk_dist > 0 else 0,
+            stop_pct=(risk_dist / price) * 100 if price > 0 else 0,
+            reward_amount=shares * reward_dist if reward_dist > 0 else 0,
+            hard_stop_2pct=price * 0.98
+        )
+        
+        setup_obj = BuySetup(
+            symbol=sym,
+            valid=valid,
+            price=price,
+            trigger=f"回調至{sup_lbl} {sup_price:.2f}",
+            support=sup_price,
+            stop=stop,
+            target=tgt,
+            rrr=rrr,
+            reason="符合多頭回調支撐與 RRR 要求" if valid else "目前價格未緊貼支撐或 RRR 未達門檻",
+            rsi=r,
+            sizing=sizing
+        )
+        
+        if valid:
+            alert_text = f"🟢 【買點訊號】觀察清單中的 `{sym}` 現價已回調至支撐位，符合買入條件 (RRR: {rrr:.2f})。"
+            alerts.append(Alert(f"setup:{sym}", "opportunity", alert_text))
+            send_telegram_alert(alert_text)
+
+        setups.append(setup_obj)
+    return setups
 
 
 @dataclass
@@ -238,9 +333,6 @@ class Alert:
 
 
 def evaluate_holdings(alerts: list[Alert]) -> list[HoldingStatus]:
-    """
-    將輸入的 HOLDINGS 依據代號做跨 App 的自動加權平均合併
-    """
     aggregated = {}
     for h in HOLDINGS:
         sym = str(h.get("symbol", "")).strip().upper()
@@ -303,7 +395,9 @@ def evaluate_holdings(alerts: list[Alert]) -> list[HoldingStatus]:
         )
 
         if not is_lt and price <= stop:
-            alerts.append(Alert(f"stop:{sym}", "danger", f"⚠️ 停損警報 {sym}：現價 {price:.2f} 跌穿停損 {stop:.2f}"))
+            alert_text = f"⚠️ 【停損警報】持倉標的 `{sym}` 現價已跌破預設停損價，請前往 App 確認。"
+            alerts.append(Alert(f"stop:{sym}", "danger", alert_text))
+            send_telegram_alert(alert_text)
 
         results.append(hs)
         
@@ -321,6 +415,6 @@ class AnalysisResult:
 def run_analysis(account_size: float = ACCOUNT_SIZE, risk_pct: float = MAX_RISK_PCT) -> AnalysisResult:
     alerts: list[Alert] = []
     macro = build_macro_snapshot()
-    setups = []
     holdings = evaluate_holdings(alerts)
+    setups = scan_setups(account_size, risk_pct, alerts)
     return AnalysisResult(macro=macro, setups=setups, holdings=holdings, alerts=alerts)
