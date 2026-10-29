@@ -297,7 +297,7 @@ def scan_setups(account_size: float, risk_pct: float, alerts: list[Alert]) -> li
         if valid:
             alert_text = f"🟢 【買點訊號】觀察清單中的 `{sym}` 現價已回調至支撐位，符合買入條件 (RRR: {rrr:.2f})。"
             alerts.append(Alert(f"setup:{sym}", "opportunity", alert_text))
-            send_telegram_alert(alert_text)
+            # 修正：網頁開啟時不自動發送 Telegram 訊息，由背景腳本 cron_monitor.py 負責發送
 
         setups.append(setup_obj)
     return setups
@@ -393,7 +393,7 @@ def evaluate_holdings(alerts: list[Alert]) -> list[HoldingStatus]:
         if not is_lt and price <= stop:
             alert_text = f"⚠️ 【停損警報】持倉標的 `{sym}` 現價已跌破預設停損價，請前往 App 確認。"
             alerts.append(Alert(f"stop:{sym}", "danger", alert_text))
-            send_telegram_alert(alert_text)
+            # 修正：網頁開啟時不自動發送 Telegram 訊息，由背景腳本 cron_monitor.py 負責發送
 
         results.append(hs)
         
