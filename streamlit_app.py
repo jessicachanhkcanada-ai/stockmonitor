@@ -2,7 +2,7 @@
 """
 ==========================================================================
  📈 智慧股票監控與風控助理 — Streamlit 網頁版
- 支援 Telegram 設定、買點原因解析、圖表顯示與截圖匯入
+ 支援 Telegram 設定、買點原因解析、圖表顯示與手動持倉管理
 ==========================================================================
 """
 
@@ -19,7 +19,6 @@ from typing import Optional
 import pandas as pd
 import requests
 import streamlit as st
-from PIL import Image
 
 import stock_monitor as sm
 
@@ -29,36 +28,6 @@ HOLD_COLS = ["symbol", "shares", "avg_cost", "stop", "target", "is_long_term"]
 LEVEL_ORDER = {"danger": 0, "warn": 1, "opportunity": 2, "info": 3}
 
 st.set_page_config(page_title="智慧股票監控與風控助理", page_icon="📈", layout="wide")
-
-
-# ==========================================================================
-# 📸 跨券商截圖辨識模組
-# ==========================================================================
-
-def parse_holding_image(uploaded_file) -> list[dict]:
-    parsed_items = []
-    try:
-        image = Image.open(uploaded_file)
-        detected_holdings = [
-            {"symbol": "QQC.TO", "shares": 99.9859, "avg_cost": 49.22},
-            {"symbol": "SGOV",   "shares": 21.0,    "avg_cost": 100.6047},
-            {"symbol": "SPCX",   "shares": 5.0,     "avg_cost": 170.00},
-        ]
-        
-        for item in detected_holdings:
-            parsed_items.append({
-                "symbol": str(item["symbol"]).strip().upper(),
-                "shares": float(item["shares"]),
-                "avg_cost": float(item["avg_cost"]),
-                "stop": 0.0,
-                "target": 0.0,
-                "is_long_term": False
-            })
-            
-    except Exception as exc:
-        st.error(f"解析截圖失敗：{exc}")
-        
-    return parsed_items
 
 
 # ==========================================================================
@@ -235,21 +204,6 @@ def main() -> None:
                 else:
                     st.warning("請先填寫 Bot Token 與 Chat ID。")
 
-        # 📸 截圖上傳區
-        with st.expander("📸 截圖自動匯入持倉", expanded=False):
-            st.caption("支援 Wealthsimple 與 Questrade 截圖自動辨識。")
-            uploaded_img = st.file_uploader("選擇截圖 (PNG / JPG)", type=["png", "jpg", "jpeg"], key="uploader")
-            
-            if uploaded_img is not None:
-                if st.button("✨ 解析截圖並加入持倉", type="primary"):
-                    parsed_items = parse_holding_image(uploaded_img)
-                    if parsed_items:
-                        for item in parsed_items:
-                            cfg["holdings"].append(item)
-                        save_settings(cfg)
-                        st.success("已成功匯入持倉！")
-                        st.rerun()
-
         # 💼 持倉表格
         with st.expander("💼 目前持倉（手動微調/預覽）", expanded=True):
             hold_df = st.data_editor(
@@ -368,7 +322,7 @@ def main() -> None:
             
             st.dataframe(df_disp, hide_index=True)
         else:
-            st.info("尚無持倉資料，請從左側欄手動輸入或上傳截圖。")
+            st.info("尚無持倉資料，請從左側欄手動輸入。")
 
     with t4:
         st.subheader("風險與加碼警報")
