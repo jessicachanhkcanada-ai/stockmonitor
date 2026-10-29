@@ -3,7 +3,7 @@
 """
 ==========================================================================
  股票與 ETF 智慧監控與風控助理 (後端引擎)
- 支援 USD 自動轉 CAD 匯率換算、跨 App 庫存加權合併與安全推播
+ 支援 USD 自動轉 CAD 匯率換算、持倉風險與帳戶類型解析與安全推播
 ==========================================================================
 """
 
@@ -247,7 +247,6 @@ def scan_setups(account_size: float, risk_pct: float, alerts: list[Alert]) -> li
             setups.append(BuySetup(symbol=sym, valid=False, reason="歷史資料不足 60 根 K 線"))
             continue
             
-        # 若為美股自動轉為 CAD 計算
         fx_mult = fx if not (sym.endswith(".TO") or sym.endswith(".V")) else 1.0
         price = float(df["Close"].iloc[-1]) * fx_mult
         st = analyze_structure(df)
@@ -329,6 +328,8 @@ class HoldingStatus:
     pnl_pct: float
     dist_to_stop_pct: float
     rrr_now: Optional[float]
+    risk_level: str = "高風險 (High)"
+    account_type: str = "TFSA"
     is_long_term: bool = False
     setup: Optional[BuySetup] = None
 
@@ -353,12 +354,16 @@ def evaluate_holdings(alerts: list[Alert]) -> list[HoldingStatus]:
             continue
             
         is_lt = bool(h.get("is_long_term", False))
+        risk_lvl = str(h.get("risk_level", "高風險 (High)"))
+        acc_type = str(h.get("account_type", "TFSA"))
         
         if sym not in aggregated:
             aggregated[sym] = {
                 "shares": 0.0,
                 "total_cost": 0.0,
                 "is_long_term": is_lt,
+                "risk_level": risk_lvl,
+                "account_type": acc_type,
                 "stop": float(h.get("stop", 0) or 0),
                 "target": float(h.get("target", 0) or 0),
             }
@@ -374,12 +379,13 @@ def evaluate_holdings(alerts: list[Alert]) -> list[HoldingStatus]:
         shares = data["shares"]
         avg_cost = data["total_cost"] / shares if shares > 0 else 0.0
         is_lt = data["is_long_term"]
+        risk_lvl = data["risk_level"]
+        acc_type = data["account_type"]
         
         df = get_history(sym)
         if df.empty:
             continue
             
-        # 判斷幣別並自動換算為 CAD
         fx_mult = fx if not (sym.endswith(".TO") or sym.endswith(".V")) else 1.0
         
         price = float(df["Close"].iloc[-1]) * fx_mult
@@ -403,7 +409,7 @@ def evaluate_holdings(alerts: list[Alert]) -> list[HoldingStatus]:
             stop=stop, target=target, market_value=mv, cost_value=cv,
             pnl=mv - cv, pnl_pct=(price / avg_cost - 1) * 100 if avg_cost > 0 else 0.0,
             dist_to_stop_pct=(price / stop - 1) * 100 if stop > 0 else 0.0,
-            rrr_now=rrr_now, is_long_term=is_lt
+            rrr_now=rrr_now, risk_level=risk_lvl, account_type=acc_type, is_long_term=is_lt
         )
 
         if not is_lt and price <= stop:
