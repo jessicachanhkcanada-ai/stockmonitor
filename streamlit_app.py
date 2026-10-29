@@ -311,3 +311,181 @@ def main() -> None:
             c1, c2, c3 = st.columns(3)
             c1.metric("總成本", f"${tc:,.2f}")
             c2.metric("總市值", f"${tv:,.2f}")
+            c3.metric("未實現損益", f"${pnl:+,.2f}", f"{(tv / tc - 1) * 100:+.2f}%" if tc else None)
+            
+            df_disp = pd.DataFrame([{
+                "代號": r.symbol,
+                "總股數": r.shares,
+                "加權平均成本": r.avg_cost,
+                "現價": r.price,
+                "總市值": r.market_value,
+                "未實現損益": r.pnl,
+                "損益%": r.pnl_pct,
+                "自動停損價": r.stop,
+                "自動目標價": r.target,
+                "長線資產": "是" if r.is_long_term else "否"
+            } for r in rows])
+            
+            st.dataframe(df_disp, hide_index=True)
+            
+            st.markdown("---")
+            st.subheader("📊 持倉結構與權重分析 (Allocation & Concentration)")
+
+            df_alloc = pd.DataFrame([{
+                "Symbol": r.symbol,
+                "MarketValue": r.market_value,
+            } for r in rows])
+            
+            total_mv = df_alloc["MarketValue"].sum()
+            if total_mv > 0:
+                df_alloc["Weight"] = df_alloc["MarketValue"] / total_mv * 100
+                
+                col_chart, col_health = st.columns([1.3, 0.7])
+                
+                with col_chart:
+                    import altair as alt
+                    chart = alt.Chart(df_alloc).mark_arc(innerRadius=60).encode(
+                        theta=alt.Theta(field="MarketValue", type="quantitative"),
+                        color=alt.Color(field="Symbol", type="nominal", legend=alt.Legend(title="標的代號")),
+                        tooltip=[
+                            "Symbol", 
+                            alt.Tooltip("MarketValue", format="$,.2f", title="市值"), 
+                            alt.Tooltip("Weight", format=".1f%", title="佔比")
+                        ]
+                    ).properties(title="資產配置權重佔比 (Market Value)", height=320)
+                    st.altair_chart(chart, use_container_width=True)
+                    
+                with col_health:
+                    st.markdown("### 🔍 集中度診斷")
+                    max_row = df_alloc.loc[df_alloc["Weight"].idxmax()]
+                    max_sym = max_row["Symbol"]
+                    max_weight = max_row["Weight"]
+                    
+                    if max_weight > 40:
+                        st.warning(f"⚠️ **重壓警示**：`{max_sym}` 佔比高達 **{max_weight:.1f}%**，單一資產集中風險偏高，建議留意產業或市場波動。")
+                    elif max_weight > 25:
+                        st.info(f"ℹ️ **核心持倉**：`{max_sym}` 為目前第一大重倉，佔比 **{max_weight:.1f}%**，配置符合主流核心資產特性。")
+                    else:
+                        st.success("🟢 **配置均衡**：投資組合分散良好，無單一標的過度集中。")
+                        
+                    small_ones = df_alloc[df_alloc["Weight"] < 3]["Symbol"].tolist()
+                    if small_ones:
+                        st.caption(f"💡 佔比低於 3% 的標的：`{', '.join(small_ones)}`（個別漲跌對整體資產影響有限）。")
+        else:
+            st.info("尚無持倉資料，請從左側欄手動輸入。")
+
+    with t4:
+        st.subheader("風險與加碼警報")
+        if res.alerts:
+            for a in res.alerts:
+                if a.level == "danger":
+                    st.error(a.text)
+                elif a.level == "warn":
+                    st.warning(a.text)
+                else:
+                    st.info(a.text)
+        else:
+            st.success("目前無短線警報 ✅")
+
+    with t5:
+        st.subheader("📈 標的走勢與均線圖表")
+        selected_sym = st.selectbox("選擇要檢視的標的", sm.WATCHLIST + [h.symbol for h in res.holdings])
+        if selected_sym:
+            df_chart = sm.get_history(selected_sym, period="6mo")
+            if not df_chart.empty:
+                df_chart["SMA20"] = df_chart["Close"].rolling(20).mean()
+                df_chart["SMA50"] = df_chart["Close"].rolling(50).mean()
+                st.line_chart(df_chart[["Close", "SMA20", "SMA50"]])
+            else:
+                st.warning(f"無法取得 {selected_sym} 的圖表資料。")
+
+    # ---------------- 🏠 6. 房貸與個人財務管理 (直接手動輸入年度收支總額) ----------------
+    with t6:
+        st.subheader("🏠 房貸追蹤與年度收支手動填寫")
+        st.caption("您可以隨時在此直接更新您截至目前的年度總收入與總支出金額，系統會自動換算每月平均並更新儲蓄率與淨資產。")
+        
+        # --- 1. 手動輸入年度收支總額區塊 ---
+        st.markdown("### 📊 年度收支快速輸入 (Annual Income & Expense)")
+        col_in_man, col_ex_man, col_save_btn = st.columns([1.5, 1.5, 1])
+        
+        with col_in_man:
+            manual_annual_inc = st.number_input("今年累積總收入 (CAD)", value=float(cfg.get("annual_income_manual", 97600.0)), step=1000.0, key="man_inc")
+        with col_ex_man:
+            manual_annual_exp = st.number_input("今年累積總支出 (CAD，含房貸)", value=float(cfg.get("annual_expense_manual", 92860.0)), step=1000.0, key="man_exp")
+            
+        with col_save_btn:
+            st.write("") # 對齊排版
+            if st.button("💾 儲存收支數據"):
+                cfg["annual_income_manual"] = manual_annual_inc
+                cfg["annual_expense_manual"] = manual_annual_exp
+                err = save_settings(cfg)
+                if err is None:
+                    st.success("已儲存！")
+                    st.rerun()
+                else:
+                    st.error(f"儲存失敗：{err}")
+
+        # 計算每月平均與儲蓄率
+        m_inc = manual_annual_inc / 12.0
+        m_exp = manual_annual_exp / 12.0
+        m_surplus = m_inc - m_exp
+        s_rate = (m_surplus / m_inc * 100) if m_inc > 0 else 0.0
+        
+        st.markdown("---")
+        c_i, c_e, c_s, c_r = st.columns(4)
+        c_i.metric("平均每月收入", f"CAD ${m_inc:,.2f}", f"年度: ${manual_annual_inc:,.2f}")
+        c_e.metric("平均每月支出", f"CAD ${m_exp:,.2f}", f"年度: ${manual_annual_exp:,.2f}")
+        c_s.metric("平均每月可支配結餘", f"CAD ${m_surplus:,.2f}", f"{m_surplus * 12:+,.2f} /年")
+        c_r.metric("動態儲蓄率", f"{s_rate:.1f}%")
+
+        st.markdown("---")
+
+        # --- 2. 房貸試算與淨資產 ---
+        col_m1, col_m2 = st.columns(2)
+        
+        with col_m1:
+            st.markdown("### 📋 房貸動態模擬（利率可調）")
+            mortgage_principal = st.number_input("剩餘房貸本金 (CAD)", value=float(cfg.get("mortgage_principal", 530000.0)), step=5000.0, key="m_prin")
+            mortgage_rate = st.number_input("目前房貸年利率 (%)", value=float(cfg.get("mortgage_rate", 3.45)), step=0.05, key="m_rate") / 100.0
+            mortgage_years = st.number_input("剩餘還款年限 (年)", value=float(cfg.get("mortgage_years", 23.0)), step=1.0, key="m_yrs")
+            weekly_payment = st.number_input("每週還款額 (CAD)", value=float(cfg.get("weekly_payment", 650.0)), step=10.0, key="m_wk")
+            
+            annual_interest_approx = mortgage_principal * mortgage_rate
+            weekly_interest_approx = annual_interest_approx / 52
+            weekly_principal_approx = weekly_payment - weekly_interest_approx
+            
+            st.info(
+                f"💡 **目前房貸狀況解析**：\n\n"
+                f"- 每年產生利息約：`CAD ${annual_interest_approx:,.2f}`\n"
+                f"- 每週還款 `${weekly_payment:.0f}` 中：約 `CAD ${weekly_interest_approx:.2f}` 為利息，`CAD ${weekly_principal_approx:.2f}` 為本金。\n"
+                f"- 預計約 **{mortgage_years:.1f} 年後**（約 52 歲）清償，比 55 歲目標提早 3 年！✅"
+            )
+
+        with col_m2:
+            st.markdown("### 💰 全面淨資產總覽 (Net Worth)")
+            total_stock_value = sum(r.market_value for r in res.holdings) if res.holdings else 0.0
+            cash_savings = st.number_input("現金與高利活存/緊急預備金 (CAD)", value=float(cfg.get("cash_savings", 50000.0)), step=5000.0, key="c_sav")
+            
+            total_assets = total_stock_value + cash_savings
+            net_worth = total_assets - mortgage_principal
+            
+            st.metric("總資產 (股票持倉 + 現金)", f"CAD ${total_assets:,.2f}")
+            st.metric("總負債 (房貸本金)", f"CAD ${mortgage_principal:,.2f}", delta="-負債", delta_color="inverse")
+            st.metric("預估個人淨資產 (Net Worth)", f"CAD ${net_worth:,.2f}", delta="安全防線")
+
+        st.markdown("---")
+        
+        # --- 3. 20 / 40 / 40 資產配置目標對照 ---
+        st.markdown("### 🎯 資產配置與風險目標對照 (20 / 40 / 40 比例)")
+        low_target = total_assets * 0.20
+        med_target = total_assets * 0.40
+        high_target = total_assets * 0.40
+        
+        cr1, cr2, cr3 = st.columns(3)
+        cr1.metric("低風險目標 (20%)", f"CAD ${low_target:,.2f}", "HISA / 保本 / CASH.TO")
+        cr2.metric("中風險目標 (40%)", f"CAD ${med_target:,.2f}", "XEQT.TO / CM.TO 藍籌")
+        cr3.metric("高風險目標 (40%)", f"CAD ${high_target:,.2f}", "VOO / QQC.TO 科技增長")
+
+
+if __name__ == "__main__":
+    main()
