@@ -1,9 +1,9 @@
 # -*- coding: utf-8 -*-
 """
 ==========================================================================
- 📈 智慧股票監控與風控助理 — Streamlit 網頁版
- 支援 Telegram 設定、買點原因解析、圖表顯示、手動持倉管理，
- 以及全新的【🏠 房貸與個人財務管理】與月度 CSV 收支匯入功能。
+ 📈 智慧股票監控與個人財務資產管理 — Streamlit 網頁版
+ 支援 Telegram 設定、買點風險風控、手動持倉管理，
+ 以及具備手動輸入年度收支、房貸動態模擬與淨資產追蹤的【🏠 房貸與財務管理】模組。
 ==========================================================================
 """
 
@@ -62,14 +62,14 @@ def default_settings() -> dict:
         "fg_manual": 50.0,
         "tg_token": get_secret("TELEGRAM_BOT_TOKEN", ""),
         "tg_chat_id": get_secret("TELEGRAM_CHAT_ID", ""),
-        # 房貸與預算設定
+        # 房貸與手動年度收支預設值
         "mortgage_principal": 530000.0,
         "mortgage_rate": 3.45,
         "mortgage_years": 23.0,
         "weekly_payment": 650.0,
         "cash_savings": 50000.0,
-        "annual_income_after_tax": 97600.0,
-        "annual_expense_after_tax": 92860.0,
+        "annual_income_manual": 97600.0,
+        "annual_expense_manual": 92860.0,
     }
 
 
@@ -257,7 +257,7 @@ def main() -> None:
 
     # ---------------- 主畫面與分析 ----------------
     st.title("📈 智慧股票監控與個人財務資產管理")
-    st.caption("支援 Telegram 自動推播、技術分析、持倉風控，以及個人淨資產與房貸動態模擬。")
+    st.caption("支援 Telegram 自動推播、技術分析、持倉風控，以及手動輸入的個人淨資產與房貸動態模擬。")
 
     try:
         with st.spinner("正在分析大盤、觀察清單與持倉…"):
@@ -311,180 +311,3 @@ def main() -> None:
             c1, c2, c3 = st.columns(3)
             c1.metric("總成本", f"${tc:,.2f}")
             c2.metric("總市值", f"${tv:,.2f}")
-            c3.metric("未實現損益", f"${pnl:+,.2f}", f"{(tv / tc - 1) * 100:+.2f}%" if tc else None)
-            
-            df_disp = pd.DataFrame([{
-                "代號": r.symbol,
-                "總股數": r.shares,
-                "加權平均成本": r.avg_cost,
-                "現價": r.price,
-                "總市值": r.market_value,
-                "未實現損益": r.pnl,
-                "損益%": r.pnl_pct,
-                "自動停損價": r.stop,
-                "自動目標價": r.target,
-                "長線資產": "是" if r.is_long_term else "否"
-            } for r in rows])
-            
-            st.dataframe(df_disp, hide_index=True)
-            
-            st.markdown("---")
-            st.subheader("📊 持倉結構與權重分析 (Allocation & Concentration)")
-
-            df_alloc = pd.DataFrame([{
-                "Symbol": r.symbol,
-                "MarketValue": r.market_value,
-            } for r in rows])
-            
-            total_mv = df_alloc["MarketValue"].sum()
-            if total_mv > 0:
-                df_alloc["Weight"] = df_alloc["MarketValue"] / total_mv * 100
-                
-                col_chart, col_health = st.columns([1.3, 0.7])
-                
-                with col_chart:
-                    import altair as alt
-                    chart = alt.Chart(df_alloc).mark_arc(innerRadius=60).encode(
-                        theta=alt.Theta(field="MarketValue", type="quantitative"),
-                        color=alt.Color(field="Symbol", type="nominal", legend=alt.Legend(title="標的代號")),
-                        tooltip=[
-                            "Symbol", 
-                            alt.Tooltip("MarketValue", format="$,.2f", title="市值"), 
-                            alt.Tooltip("Weight", format=".1f%", title="佔比")
-                        ]
-                    ).properties(title="資產配置權重佔比 (Market Value)", height=320)
-                    st.altair_chart(chart, use_container_width=True)
-                    
-                with col_health:
-                    st.markdown("### 🔍 集中度診斷")
-                    max_row = df_alloc.loc[df_alloc["Weight"].idxmax()]
-                    max_sym = max_row["Symbol"]
-                    max_weight = max_row["Weight"]
-                    
-                    if max_weight > 40:
-                        st.warning(f"⚠️ **重壓警示**：`{max_sym}` 佔比高達 **{max_weight:.1f}%**，單一資產集中風險偏高，建議留意產業或市場波動。")
-                    elif max_weight > 25:
-                        st.info(f"ℹ️ **核心持倉**：`{max_sym}` 為目前第一大重倉，佔比 **{max_weight:.1f}%**，配置符合主流核心資產特性。")
-                    else:
-                        st.success("🟢 **配置均衡**：投資組合分散良好，無單一標的過度集中。")
-                        
-                    small_ones = df_alloc[df_alloc["Weight"] < 3]["Symbol"].tolist()
-                    if small_ones:
-                        st.caption(f"💡 佔比低於 3% 的標的：`{', '.join(small_ones)}`（個別漲跌對整體資產影響有限）。")
-        else:
-            st.info("尚無持倉資料，請從左側欄手動輸入。")
-
-    with t4:
-        st.subheader("風險與加碼警報")
-        if res.alerts:
-            for a in res.alerts:
-                if a.level == "danger":
-                    st.error(a.text)
-                elif a.level == "warn":
-                    st.warning(a.text)
-                else:
-                    st.info(a.text)
-        else:
-            st.success("目前無短線警報 ✅")
-
-    with t5:
-        st.subheader("📈 標的走勢與均線圖表")
-        selected_sym = st.selectbox("選擇要檢視的標的", sm.WATCHLIST + [h.symbol for h in res.holdings])
-        if selected_sym:
-            df_chart = sm.get_history(selected_sym, period="6mo")
-            if not df_chart.empty:
-                df_chart["SMA20"] = df_chart["Close"].rolling(20).mean()
-                df_chart["SMA50"] = df_chart["Close"].rolling(50).mean()
-                st.line_chart(df_chart[["Close", "SMA20", "SMA50"]])
-            else:
-                st.warning(f"無法取得 {selected_sym} 的圖表資料。")
-
-    # ---------------- 🏠 6. 房貸與個人財務管理 ----------------
-    with t6:
-        st.subheader("🏠 房貸追蹤與個人財務健康管理")
-        
-        # --- 1. Apple Numbers / Excel CSV 匯入與收支概況 ---
-        st.markdown("### 📄 匯入 Apple Numbers / Excel 月度收支 CSV (方案 1)")
-        uploaded_file = st.file_uploader("選擇匯出的 .csv 檔案（亦可直接使用下方預設數字）", type=["csv"], key="fin_csv")
-        
-        # 預設預算金額（可隨時從畫面修改或由 CSV 覆蓋）
-        inc_val = float(cfg.get("annual_income_after_tax", 97600.0)) / 12.0
-        exp_val = float(cfg.get("annual_expense_after_tax", 92860.0)) / 12.0
-        
-        if uploaded_file is not None:
-            try:
-                df_csv = pd.read_csv(uploaded_file)
-                st.success("成功讀取 CSV 資料！")
-                st.dataframe(df_csv.head(), hide_index=True)
-                
-                # 自動搜尋是否有 Income / Expense 欄位
-                cols_upper = [c.upper() for c in df_csv.columns]
-                if "INCOME" in cols_upper and "EXPENSE" in cols_upper:
-                    inc_col = df_csv.columns[cols_upper.index("INCOME")]
-                    exp_col = df_csv.columns[cols_upper.index("EXPENSE")]
-                    inc_val = float(df_csv[inc_col].dropna().iloc[-1])
-                    exp_val = float(df_csv[exp_col].dropna().iloc[-1])
-                    st.info(f"已從 CSV 最新一列自動讀取：月收入 `${inc_val:,.2f}`，月支出 `${exp_val:,.2f}`")
-            except Exception as exc:
-                st.error(f"解析 CSV 失敗：{exc}")
-
-        m_surplus = inc_val - exp_val
-        s_rate = (m_surplus / inc_val * 100) if inc_val > 0 else 0.0
-        
-        c_inc, c_exp, c_sur, c_rate = st.columns(4)
-        c_inc.metric("預估月收入 (稅後)", f"CAD ${inc_val:,.2f}")
-        c_exp.metric("預估月支出 (含房貸)", f"CAD ${exp_val:,.2f}")
-        c_sur.metric("每月可支配結餘", f"CAD ${m_surplus:,.2f}", f"{m_surplus * 12:+,.2f} /年")
-        c_rate.metric("動態儲蓄率", f"{s_rate:.1f}%")
-
-        st.markdown("---")
-
-        # --- 2. 房貸試算與淨資產 ---
-        col_m1, col_m2 = st.columns(2)
-        
-        with col_m1:
-            st.markdown("### 📋 房貸動態模擬（利率可調）")
-            mortgage_principal = st.number_input("剩餘房貸本金 (CAD)", value=float(cfg.get("mortgage_principal", 530000.0)), step=5000.0)
-            mortgage_rate = st.number_input("目前房貸年利率 (%)", value=float(cfg.get("mortgage_rate", 3.45)), step=0.05) / 100.0
-            mortgage_years = st.number_input("剩餘還款年限 (年)", value=float(cfg.get("mortgage_years", 23.0)), step=1.0)
-            weekly_payment = st.number_input("每週還款額 (CAD)", value=float(cfg.get("weekly_payment", 650.0)), step=10.0)
-            
-            annual_interest_approx = mortgage_principal * mortgage_rate
-            weekly_interest_approx = annual_interest_approx / 52
-            weekly_principal_approx = weekly_payment - weekly_interest_approx
-            
-            st.info(
-                f"💡 **目前房貸狀況解析**：\n\n"
-                f"- 每年產生利息約：`CAD ${annual_interest_approx:,.2f}`\n"
-                f"- 每週還款 `${weekly_payment:.0f}` 中：約 `CAD ${weekly_interest_approx:.2f}` 為利息，`CAD ${weekly_principal_approx:.2f}` 為本金。\n"
-                f"- 預計約 **{mortgage_years:.1f} 年後**（約 52 歲）清償，比 55 歲目標提早 3 年！✅"
-            )
-
-        with col_m2:
-            st.markdown("### 💰 全面淨資產總覽 (Net Worth)")
-            total_stock_value = sum(r.market_value for r in res.holdings) if res.holdings else 0.0
-            cash_savings = st.number_input("現金與高利活存/緊急預備金 (CAD)", value=float(cfg.get("cash_savings", 50000.0)), step=5000.0)
-            
-            total_assets = total_stock_value + cash_savings
-            net_worth = total_assets - mortgage_principal
-            
-            st.metric("總資產 (股票持倉 + 現金)", f"CAD ${total_assets:,.2f}")
-            st.metric("總負債 (房貸本金)", f"CAD ${mortgage_principal:,.2f}", delta="-負債", delta_color="inverse")
-            st.metric("預估個人淨資產 (Net Worth)", f"CAD ${net_worth:,.2f}", delta="安全防線")
-
-        st.markdown("---")
-        
-        # --- 3. 20 / 40 / 40 資產配置目標對照 ---
-        st.markdown("### 🎯 資產配置與風險目標對照 (20 / 40 / 40 比例)")
-        low_target = total_assets * 0.20
-        med_target = total_assets * 0.40
-        high_target = total_assets * 0.40
-        
-        cr1, cr2, cr3 = st.columns(3)
-        cr1.metric("低風險目標 (20%)", f"CAD ${low_target:,.2f}", "HISA / 保本 / CASH.TO")
-        cr2.metric("中風險目標 (40%)", f"CAD ${med_target:,.2f}", "XEQT.TO / CM.TO 藍籌")
-        cr3.metric("高風險目標 (40%)", f"CAD ${high_target:,.2f}", "VOO / QQC.TO 科技增長")
-
-
-if __name__ == "__main__":
-    main()
