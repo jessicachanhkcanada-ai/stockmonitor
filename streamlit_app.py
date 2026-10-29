@@ -326,7 +326,9 @@ def main() -> None:
         for setup in res.setups:
             with st.container():
                 icon = "✅" if setup.valid else "⏳"
-                with st.expander(f"{icon} {setup.symbol} - 現價: {setup.price:.2f} | RRR: {setup.rrr:.2f if setup.rrr else 0.0}", expanded=setup.valid):
+                rrr_val = setup.rrr if setup.rrr is not None else 0.0
+                expander_label = f"{icon} {setup.symbol} - 現價: {setup.price:.2f} | RRR: {rrr_val:.2f}"
+                with st.expander(expander_label, expanded=setup.valid):
                     col1, col2, col3, col4 = st.columns(4)
                     col1.metric("觸發條件", setup.trigger if setup.trigger else "無")
                     col2.metric("建議停損價", f"{setup.stop:.2f}" if setup.stop else "N/A")
