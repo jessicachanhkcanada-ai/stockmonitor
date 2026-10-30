@@ -228,15 +228,15 @@ def main() -> None:
             wl_text = st.text_area("代號（用逗號或換行分隔）", value=", ".join(cfg["watchlist"]), height=90)
 
         with st.expander("💼 目前持倉（含互惠基金、風險與帳戶）", expanded=True):
-            st.caption("💡 提示：互惠基金代號可自訂（如 MF_1），股數填 1，平均成本填總市值金額。")
+            st.caption("💡 平均成本、停損價、目標價請填該標的「原幣」：USD 標的（如 PTRN、VOO）填美元，.TO 標的填加幣。互惠基金代號可自訂（如 MF_1），股數填 1，平均成本填總市值金額（CAD）。")
             hold_df = st.data_editor(
                 holdings_to_df(cfg["holdings"]), num_rows="dynamic", key="holdings_editor",
                 column_config={
                     "symbol": st.column_config.TextColumn("代號 / 基金名稱"),
                     "shares": st.column_config.NumberColumn("股數 / 單位", min_value=0.0, step=0.0001, format="%.4f"),
-                    "avg_cost": st.column_config.NumberColumn("平均成本 / 總市值", min_value=0.0, format="%.2f"),
-                    "stop": st.column_config.NumberColumn("停損價(留空自動算)", min_value=0.0, format="%.2f"),
-                    "target": st.column_config.NumberColumn("目標價(留空自動算)", min_value=0.0, format="%.2f"),
+                    "avg_cost": st.column_config.NumberColumn("平均成本（原幣）/ 總市值", min_value=0.0, format="%.2f"),
+                    "stop": st.column_config.NumberColumn("停損價（原幣，留空自動算）", min_value=0.0, format="%.2f"),
+                    "target": st.column_config.NumberColumn("目標價（原幣，留空自動算）", min_value=0.0, format="%.2f"),
                     "risk_level": st.column_config.SelectboxColumn(
                         "風險等級", options=["低風險 (Low)", "中風險 (Medium)", "高風險 (High)"], required=True
                     ),
@@ -365,13 +365,18 @@ def main() -> None:
             global_alerts, by_sym = sm.group_alerts(res.alerts)
             held_syms = {r.symbol for r in res.holdings}
 
-            n_danger = sum(1 for a in res.alerts if a.level == "danger")
-            n_warn = sum(1 for a in res.alerts if a.level == "warn")
-            n_buy = sum(1 for a in res.alerts if a.level == "success")
-            n_info = sum(1 for a in res.alerts if a.level == "info")
+            plain = [a for a in res.alerts if not a.is_advice]
+            advices = [a for a in res.alerts if a.is_advice]
+            n_danger = sum(1 for a in plain if a.level == "danger")
+            n_warn = sum(1 for a in plain if a.level == "warn")
+            n_buy = sum(1 for a in plain if a.level == "success")
+            n_add = sum(1 for a in advices if "加碼" in a.action)
+            n_cut = sum(1 for a in advices if any(k in a.action for k in ("減碼", "出場", "停利", "檢視")))
+            n_hold = len(advices) - n_add - n_cut
             st.caption(
-                f"共 {len(by_sym)} 檔標的有警報｜🔴 危險 {n_danger}｜🟠 預警 {n_warn}｜"
-                f"🎯 目標 {n_info}｜🟢 買點 {n_buy}（同一標的的警報已合併顯示）"
+                f"共 {len(by_sym)} 檔標的｜🔴 危險 {n_danger}｜🟠 預警 {n_warn}｜🟢 買點 {n_buy}｜"
+                f"🧭 持倉建議：可加碼 {n_add}、減碼／出場／停利 {n_cut}、持有 {n_hold}"
+                "（同一標的的警報已合併顯示；建議為規則訊號，非投資建議）"
             )
 
             for a in global_alerts:
@@ -379,12 +384,19 @@ def main() -> None:
 
             box = {"danger": st.error, "warn": st.warning, "info": st.info, "success": st.success}
             for sym, items in by_sym.items():
-                worst = items[0].level  # 已依嚴重度排序
+                advice = next((a for a in items if a.is_advice), None)
+                # 已有持倉建議時，買點訊息會併入建議內，不重複顯示
+                shown = [a for a in items if not a.is_advice and not (advice and a.key.startswith("buy_"))]
+                worst = items[0].level  # 已依嚴重度排序（含建議）
                 cur = symbol_currency(sym)
                 role = "💼 持倉" if sym in held_syms else "👀 自選"
                 lines = [f"**{sym}**　{currency_badge(cur)}　·　{role}"]
-                for a in items:
+                for a in shown:
                     lines.append("- " + a.text.replace(f"{sym} ", "", 1))
+                if advice is not None:
+                    icon = {"danger": "🔴", "warn": "🟠", "success": "🟢"}.get(advice.level, "⚪")
+                    body = advice.text.split("】", 1)[-1]
+                    lines.append(f"\n**🧭 規則建議：{icon} {advice.action}**\n\n{body}")
                 box.get(worst, st.info)("\n".join(lines))
 
     with t5:
@@ -423,36 +435,40 @@ def main() -> None:
 
             st.caption(
                 f"🇺🇸 藍色 = USD 標的（已按 USD/CAD {fx_current:.4f} 換算）｜🇨🇦 紅色 = CAD 標的｜"
-                "標示 (CAD) 的欄位一律為加幣；「現價（原幣）」為該標的實際交易幣別的價格"
+                "「平均成本／現價／停損／目標」為該標的原幣（US$ 或 C$）；"
+                "標示 (CAD) 的欄位為加幣合併數字"
             )
-            cur_list = [symbol_currency(r.symbol) for r in rows]
+            advice_map = {a.symbol: a.action for a in res.alerts if a.is_advice}
+            cur_list = [r.currency for r in rows]
+            native_cols = ["原幣別", "平均成本（原幣）", "現價（原幣）", "停損價（原幣）", "目標價（原幣）"]
             df_disp = pd.DataFrame([{
                 "代號": r.symbol,
-                "原幣別": currency_badge(c),
-                "現價（原幣）": native_price_text("USD" if c == "USD" else "CAD", r.price, fx_current),
+                "原幣別": currency_badge(r.currency if r.has_live else "CAD(手動)"),
                 "總股數": r.shares,
-                "加權平均成本 (CAD)": r.avg_cost,
-                "現價 (CAD)": r.price,
+                "平均成本（原幣）": sm.money(r.currency, r.avg_cost_native),
+                "現價（原幣）": sm.money(r.currency, r.price_native),
+                "停損價（原幣）": sm.money(r.currency, r.stop_native),
+                "目標價（原幣）": sm.money(r.currency, r.target_native),
+                "損益 %": r.pnl_pct,
+                "總成本 (CAD)": r.cost_value,
                 "總市值 (CAD)": r.market_value,
                 "未實現損益 (CAD)": r.pnl,
-                "損益 %": r.pnl_pct,
-                "停損價 (CAD)": r.stop,
-                "目標價 (CAD)": r.target,
+                "倉位占比 %": r.weight_pct,
+                "規則建議": advice_map.get(r.symbol, "—"),
                 "風險等級": r.risk_level,
                 "帳戶類型": r.account_type,
                 "長線資產": "是" if r.is_long_term else "否",
-            } for r, c in zip(rows, cur_list)])
+            } for r in rows])
             fmt_h = {
-                "總股數": "{:,.4f}", "加權平均成本 (CAD)": "{:,.2f}", "現價 (CAD)": "{:,.2f}",
-                "總市值 (CAD)": "{:,.2f}", "未實現損益 (CAD)": "{:+,.2f}", "損益 %": "{:+.2f}%",
-                "停損價 (CAD)": "{:,.2f}", "目標價 (CAD)": "{:,.2f}",
+                "總股數": "{:,.4f}", "損益 %": "{:+.2f}%", "總成本 (CAD)": "{:,.2f}",
+                "總市值 (CAD)": "{:,.2f}", "未實現損益 (CAD)": "{:+,.2f}", "倉位占比 %": "{:.1f}%",
             }
-            sty = style_currency_cols(df_disp, ["USD" if c == "USD" else "CAD" for c in cur_list],
-                                      ["原幣別", "現價（原幣）"], fmt_h)
+            sty = style_currency_cols(df_disp, cur_list, native_cols, fmt_h)
             sty = sty.map(lambda v: "color: #22c55e;" if isinstance(v, (int, float)) and v > 0
                           else ("color: #ef4444;" if isinstance(v, (int, float)) and v < 0 else ""),
                           subset=["未實現損益 (CAD)", "損益 %"])
             st.dataframe(sty, hide_index=True)
+            st.caption("🧭「規則建議」依你設定的停損、目標價、倉位上限與買點規則產生，詳細理由請看「⚠️ 警報」分頁；僅供參考，非投資建議。")
         else:
             st.info("目前沒有持倉，請在側邊欄「目前持倉」新增資料後按「儲存側邊欄設定」。")
 
