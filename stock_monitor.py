@@ -162,6 +162,32 @@ class Alert:
     key: str
     level: str  # danger / warn / info / success
     text: str
+    symbol: str = ""  # 所屬標的；留空時會依 key（如 stop_SPCX）自動推導，無對應標的者視為全域警報
+
+    def __post_init__(self) -> None:
+        if not self.symbol and "_" in self.key:
+            prefix, rest = self.key.split("_", 1)
+            if prefix in {"buy", "stop", "nearstop", "target", "lev"}:
+                self.symbol = rest
+
+
+ALERT_SEVERITY = {"danger": 0, "warn": 1, "info": 2, "success": 3}
+
+
+def group_alerts(alerts: list["Alert"]) -> tuple[list["Alert"], dict[str, list["Alert"]]]:
+    """回傳 (全域警報, {標的: [警報...]})；各標的內與標的之間皆依嚴重度排序（danger 最前）。"""
+    global_alerts: list[Alert] = []
+    by_sym: dict[str, list[Alert]] = {}
+    for a in alerts:
+        if a.symbol:
+            by_sym.setdefault(a.symbol, []).append(a)
+        else:
+            global_alerts.append(a)
+    for lst in by_sym.values():
+        lst.sort(key=lambda x: ALERT_SEVERITY.get(x.level, 9))
+    ordered = dict(sorted(by_sym.items(),
+                          key=lambda kv: (ALERT_SEVERITY.get(kv[1][0].level, 9), kv[0])))
+    return global_alerts, ordered
 
 
 @dataclass
@@ -188,18 +214,49 @@ class MacroSnapshot:
     panic_alert: bool = False
 
 
-def _fetch_fear_greed() -> tuple[Optional[float], str]:
-    """優先使用手動值，其次嘗試 CNN，失敗則回傳 None。"""
+_CNN_FG_URL = "https://production.dataviz.cnn.io/index/fearandgreed/graphdata"
+_CNN_HEADERS = {
+    "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                   "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"),
+    "Accept": "application/json, text/plain, */*",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Origin": "https://www.cnn.com",
+    "Referer": "https://www.cnn.com/markets/fear-and-greed",
+}
+
+
+def _estimate_fear_greed(vix: Optional[float]) -> Optional[float]:
+    """CNN 取不到時的估算值（非官方）：VIX 分數 + SPY 相對 125 日均線的動能分數，各佔一半。"""
+    parts: list[float] = []
+    if vix is not None:
+        parts.append(min(100.0, max(0.0, 100 - (vix - 12) / (35 - 12) * 100)))
+    spy = get_history("SPY", "1y")
+    if has_enough_data(spy, 130):
+        c = float(spy["Close"].iloc[-1])
+        ma = float(sma(spy["Close"], 125).iloc[-1])
+        parts.append(min(100.0, max(0.0, 50 + (c / ma - 1) * 500)))
+    return sum(parts) / len(parts) if parts else None
+
+
+def _fetch_fear_greed(vix: Optional[float] = None) -> tuple[Optional[float], str]:
+    """順序：手動值 → CNN（瀏覽器標頭，含日期網址備援）→ 估算值 → 無法取得。"""
     if FEAR_GREED_MANUAL is not None:
         return float(FEAR_GREED_MANUAL), "手動設定"
-    try:
-        url = "https://production.dataviz.cnn.io/index/fearandgreed/graphdata"
-        resp = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=5)
-        if resp.status_code == 200:
-            score = resp.json()["fear_and_greed"]["score"]
-            return float(score), "CNN"
-    except Exception:
-        pass
+
+    urls = [_CNN_FG_URL, f"{_CNN_FG_URL}/{dt.date.today().isoformat()}"]
+    for url in urls:
+        try:
+            resp = requests.get(url, headers=_CNN_HEADERS, timeout=8)
+            if resp.status_code == 200:
+                score = resp.json()["fear_and_greed"]["score"]
+                return float(score), "CNN"
+            print(f"[提示] CNN 恐懼貪婪指數回應 {resp.status_code}（{url}）")
+        except Exception as exc:
+            print(f"[提示] CNN 恐懼貪婪指數取得失敗：{exc}")
+
+    est = _estimate_fear_greed(vix)
+    if est is not None:
+        return est, "估算（VIX+SPY動能，非CNN官方）"
     return None, "無法取得"
 
 
@@ -232,7 +289,7 @@ def build_macro_snapshot() -> MacroSnapshot:
         vix = float(vdf["Close"].iloc[-1])
         vix_prev = float(vdf["Close"].iloc[-2])
 
-    fg, fg_src = _fetch_fear_greed()
+    fg, fg_src = _fetch_fear_greed(vix)
 
     indices = [s for s in (_index_status(b) for b in BENCHMARKS) if s is not None]
 
