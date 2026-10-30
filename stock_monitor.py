@@ -158,6 +158,39 @@ def analyze_structure(df: pd.DataFrame) -> Structure:
 
 
 @dataclass
+class TrendSignals:
+    """對應策略文件的「賣出原則」與熊市「買入條件」中與結構／趨勢線有關的訊號。"""
+    last_low: Optional[float] = None          # 最近一個已確認的擺動低點
+    broke_prior_low: bool = False             # 收盤跌穿前低（賣出原則 1）
+    uptrend_line_broken: bool = False         # 收盤跌穿「上升趨勢線」（連接最近兩個上升低點；賣出原則 2）
+    downtrend_line_breakout: bool = False     # 收盤由低位突破「下降趨勢線」（熊市買入條件 4）
+
+
+def _line_value(a: Swing, b: Swing, idx: int) -> float:
+    """通過兩個擺動點的直線，在 K 線序號 idx 的價格。"""
+    if b.idx == a.idx:
+        return b.price
+    slope = (b.price - a.price) / (b.idx - a.idx)
+    return b.price + slope * (idx - b.idx)
+
+
+def trend_signals(df: pd.DataFrame, st: Structure) -> TrendSignals:
+    sig = TrendSignals()
+    if df is None or df.empty:
+        return sig
+    n = len(df)
+    close = float(df["Close"].iloc[-1])
+    if st.lows:
+        sig.last_low = st.lows[-1].price
+        sig.broke_prior_low = close < st.lows[-1].price
+    if len(st.lows) >= 2 and st.lows[-1].price > st.lows[-2].price:
+        sig.uptrend_line_broken = close < _line_value(st.lows[-2], st.lows[-1], n - 1)
+    if len(st.highs) >= 2 and st.highs[-1].price < st.highs[-2].price:
+        sig.downtrend_line_breakout = close > _line_value(st.highs[-2], st.highs[-1], n - 1)
+    return sig
+
+
+@dataclass
 class Alert:
     key: str
     level: str  # danger / warn / info / success
@@ -209,6 +242,7 @@ class IndexStatus:
     structure: Structure
     rsi: float
     label: str
+    signals: TrendSignals = field(default_factory=TrendSignals)
 
 
 @dataclass
@@ -222,6 +256,8 @@ class MacroSnapshot:
     panic_score: int = 0
     panic_hits: list[str] = field(default_factory=list)
     panic_alert: bool = False
+    is_bear: bool = False                                   # 大盤處於空頭／高風險
+    early_warning: list[str] = field(default_factory=list)  # 任一大盤 ETF 先轉弱（策略：大盤 ETF 會提早釋出訊號）
 
 
 _CNN_FG_URL = "https://production.dataviz.cnn.io/index/fearandgreed/graphdata"
@@ -288,7 +324,7 @@ def _index_status(sym: str) -> Optional[IndexStatus]:
         label = "🔴 空頭結構"
     else:
         label = "🟠 偏空/整理"
-    return IndexStatus(sym, c, s20, above, st, r, label)
+    return IndexStatus(sym, c, s20, above, st, r, label, trend_signals(df, st))
 
 
 def build_macro_snapshot() -> MacroSnapshot:
@@ -311,9 +347,10 @@ def build_macro_snapshot() -> MacroSnapshot:
         hits.append(f"恐懼貪婪指數 {fg:.0f} ≤ {FEAR_GREED_PANIC}")
     oversold = [i.symbol for i in indices if i.rsi <= RSI_OVERSOLD]
     if oversold:
-        hits.append(f"RSI 超賣：{', '.join(oversold)}")
+        hits.append(f"RSI 超賣（< {RSI_OVERSOLD}）：{', '.join(oversold)}")
 
     # 市場體制
+    is_bear = False
     if indices:
         n_above = sum(1 for i in indices if i.above20)
         n_down = sum(1 for i in indices if i.structure.downtrend)
@@ -321,15 +358,39 @@ def build_macro_snapshot() -> MacroSnapshot:
             regime = "多頭（偏好順勢回調買入）"
         elif n_above == 0 or n_down >= 2:
             regime = "空頭／高風險（降低倉位、嚴守停損）"
+            is_bear = True
         else:
             regime = "震盪（縮小倉位、等待確認）"
     else:
         regime = "資料不足，無法判斷"
 
+    # 熊市吸引買入條件 4、5：僅在非多頭時才計入（多頭時這兩項天天成立，沒有參考價值）
+    if indices and regime[:2] != "多頭":
+        brk = [i.symbol for i in indices if i.signals.downtrend_line_breakout]
+        if brk:
+            hits.append(f"由低位突破下降趨勢線：{', '.join(brk)}")
+        turning = [i.symbol for i in indices if i.structure.uptrend]
+        if turning:
+            hits.append(f"開始出現底高於底、頂高於頂：{', '.join(turning)}")
+
+    # 大盤預警：SPY / QQQ / SMH 任一個先跌穿前低或趨勢線，或轉為下降結構
+    early: list[str] = []
+    for i in indices:
+        why = []
+        if i.structure.downtrend:
+            why.append("結構轉為下降（LH & LL）")
+        if i.signals.broke_prior_low:
+            why.append("收盤跌穿前低")
+        if i.signals.uptrend_line_broken:
+            why.append("收盤跌穿上升趨勢線")
+        if why:
+            early.append(f"{i.symbol}：{'、'.join(why)}")
+
     return MacroSnapshot(
         vix=vix, vix_prev=vix_prev, fear_greed=fg, fg_source=fg_src,
         indices=indices, regime=regime,
         panic_score=len(hits), panic_hits=hits, panic_alert=len(hits) >= 2,
+        is_bear=is_bear, early_warning=early,
     )
 
 
@@ -356,6 +417,8 @@ class BuySetup:
     reason: str = ""
     rsi: float = float("nan")
     sizing: Optional[Sizing] = None
+    entry_type: str = ""      # 主要買點（前低／前高轉支撐）或 次要買點（20 日線，RRR 較低）
+    staged: bool = False      # 熊市吸引條件觸發的「分批」買入（建議倉位減半）
 
 
 def find_support(df: pd.DataFrame, st: Structure) -> Optional[tuple[float, str]]:
