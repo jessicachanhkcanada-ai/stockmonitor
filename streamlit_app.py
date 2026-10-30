@@ -11,6 +11,7 @@ from __future__ import annotations
 import datetime as dt
 import hmac
 import json
+import math
 import os
 import re
 from typing import Optional
@@ -251,6 +252,93 @@ def main() -> None:
         "📊 宏觀體制", "🔍 買點掃描", "💼 持倉風控", "⚠️ 警報", "📈 互動圖表", "🏠 房貸與財務管理"
     ])
 
+    with t1:
+        st.subheader("📊 宏觀市場體制")
+        m = res.macro
+        a1, a2, a3, a4 = st.columns(4)
+        if m.vix is not None:
+            vd = m.vix - m.vix_prev if m.vix_prev is not None else None
+            a1.metric("VIX 恐慌指數", f"{m.vix:.2f}", f"{vd:+.2f}" if vd is not None else None, delta_color="inverse")
+        else:
+            a1.metric("VIX 恐慌指數", "N/A")
+        a2.metric("恐懼貪婪指數", f"{m.fear_greed:.0f}" if m.fear_greed is not None else "N/A", m.fg_source, delta_color="off")
+        a3.metric("恐慌評分", f"{m.panic_score} / 3")
+        a4.metric("USD/CAD", f"{fx_current:.4f}")
+        st.info(f"**目前市場體制：** {m.regime}")
+        if m.panic_alert:
+            st.warning("😱 恐慌訊號觸發：" + "；".join(m.panic_hits))
+        elif m.panic_hits:
+            st.caption("⚠️ 部分恐慌條件：" + "；".join(m.panic_hits))
+        if m.indices:
+            st.dataframe(pd.DataFrame([{
+                "指數/ETF": i.symbol, "收盤價 (USD)": round(i.close, 2), "20日均線": round(i.sma20, 2),
+                "站上20日線": "是" if i.above20 else "否", "RSI(14)": round(i.rsi, 1), "狀態": i.label,
+            } for i in m.indices]), hide_index=True)
+        else:
+            st.warning("無法取得指數資料（可能是 yfinance 暫時連線失敗），請稍後重新整理。")
+
+    with t2:
+        st.subheader("🔍 自選股買點掃描")
+        if not res.setups:
+            st.info("自選股清單是空的，請在側邊欄加入代號。")
+        else:
+            n_valid = sum(1 for s in res.setups if s.valid)
+            st.caption(f"共掃描 {len(res.setups)} 檔，符合買點 {n_valid} 檔（價格已換算為 CAD）")
+            rows_s = []
+            for s in res.setups:
+                sz = s.sizing
+                rows_s.append({
+                    "代號": s.symbol,
+                    "狀態": "✅ 符合" if s.valid else "⏳ 等待",
+                    "現價 (CAD)": None if math.isnan(s.price) else round(s.price, 2),
+                    "支撐": None if s.support is None else round(s.support, 2),
+                    "停損": None if s.stop is None else round(s.stop, 2),
+                    "目標": None if s.target is None else round(s.target, 2),
+                    "RRR": None if s.rrr is None else round(s.rrr, 2),
+                    "RSI": None if math.isnan(s.rsi) else round(s.rsi, 1),
+                    "建議股數": sz.shares if sz else None,
+                    "下單金額": None if not sz else round(sz.order_value, 2),
+                    "最大虧損": None if not sz else round(sz.risk_amount, 2),
+                    "說明": s.reason,
+                })
+            st.dataframe(pd.DataFrame(rows_s), hide_index=True)
+
+    with t4:
+        st.subheader("⚠️ 警報")
+        if not res.alerts:
+            st.success("✅ 目前沒有觸發任何警報。")
+        else:
+            for a in res.alerts:
+                if a.level == "danger":
+                    st.error(a.text)
+                elif a.level == "warn":
+                    st.warning(a.text)
+                elif a.level == "success":
+                    st.success(a.text)
+                else:
+                    st.info(a.text)
+
+    with t5:
+        st.subheader("📈 互動圖表")
+        choices = list(dict.fromkeys(list(live_cfg["watchlist"]) + [h["symbol"] for h in live_cfg["holdings"]]))
+        if not choices:
+            st.info("請先在側邊欄加入自選股或持倉。")
+        else:
+            cc1, cc2 = st.columns([2, 1])
+            sel = cc1.selectbox("選擇標的", choices)
+            per = cc2.selectbox("期間", ["3mo", "6mo", "1y", "2y"], index=2)
+            hdf = sm.get_history(sel, per)
+            if hdf.empty:
+                st.warning(f"{sel} 沒有可用的價格資料（互惠基金無法繪圖）。")
+            else:
+                chart_df = pd.DataFrame({
+                    "收盤價": hdf["Close"],
+                    "SMA20": sm.sma(hdf["Close"], 20),
+                    "SMA50": sm.sma(hdf["Close"], 50),
+                })
+                st.line_chart(chart_df)
+                st.caption(f"{sel} 最新收盤：{float(hdf['Close'].iloc[-1]):,.2f}（原幣別）｜RSI(14)：{float(sm.rsi(hdf['Close']).iloc[-1]):.1f}")
+
     with t3:
         st.subheader("💼 持倉綜合損益與風控（已自動換算為 CAD 合併）")
         rows = res.holdings
@@ -280,6 +368,8 @@ def main() -> None:
                 "長線資產": "是" if r.is_long_term else "否"
             } for r in rows])
             st.dataframe(df_disp, hide_index=True)
+        else:
+            st.info("目前沒有持倉，請在側邊欄「目前持倉」新增資料後按「儲存側邊欄設定」。")
 
     with t6:
         st.subheader("🏠 房貸追蹤與年度收支手動填寫")
