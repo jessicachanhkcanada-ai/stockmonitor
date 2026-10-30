@@ -110,13 +110,19 @@ def auto_detect_risk(sym: str) -> str:
         return "高風險 (High)"
 
 
+def fmt_signed(value: float) -> str:
+    """格式化正負金額，例如 +$1,234.00 / -$1,234.00"""
+    sign = "+" if value >= 0 else "-"
+    return f"{sign}${abs(value):,.2f}"
+
+
 def holdings_to_df(holdings: list[dict]) -> pd.DataFrame:
     for h in holdings:
         if "risk_level" not in h or not h["risk_level"]:
             h["risk_level"] = auto_detect_risk(h.get("symbol", ""))
         if "account_type" not in h or not h["account_type"]:
             h["account_type"] = "TFSA"
-            
+
     df = pd.DataFrame(holdings)
     for col in HOLD_COLS:
         if col not in df.columns:
@@ -155,12 +161,12 @@ def clean_holdings(df: pd.DataFrame) -> list[dict]:
             is_lt = bool(r.get("is_long_term", False)) if pd.notna(r.get("is_long_term")) else False
         except (TypeError, ValueError):
             continue
-            
+
         if pd.isna(shares) or pd.isna(cost) or shares <= 0 or cost <= 0:
             continue
-            
+
         out.append({
-            "symbol": sym, "shares": shares, "avg_cost": cost, "stop": stop, 
+            "symbol": sym, "shares": shares, "avg_cost": cost, "stop": stop,
             "target": target, "risk_level": risk_level, "account_type": account_type, "is_long_term": is_lt
         })
     return out
@@ -244,7 +250,7 @@ def main() -> None:
     t1, t2, t3, t4, t5, t6 = st.tabs([
         "📊 宏觀體制", "🔍 買點掃描", "💼 持倉風控", "⚠️ 警報", "📈 互動圖表", "🏠 房貸與財務管理"
     ])
-    
+
     with t3:
         st.subheader("💼 持倉綜合損益與風控（已自動換算為 CAD 合併）")
         rows = res.holdings
@@ -252,12 +258,12 @@ def main() -> None:
             tv = sum(r.market_value for r in rows)
             tc = sum(r.cost_value for r in rows)
             pnl = tv - tc
-            
+
             c1, c2, c3 = st.columns(3)
             c1.metric("總成本 (CAD)", f"${tc:,.2f}")
             c2.metric("總市值 (CAD)", f"${tv:,.2f}")
             c3.metric("未實現損益 (CAD)", f"${pnl:+,.2f}", f"{(tv / tc - 1) * 100:+.2f}%" if tc else None)
-            
+
             df_disp = pd.DataFrame([{
                 "代號": r.symbol,
                 "幣別": "CAD" if (r.symbol.endswith(".TO") or r.symbol.endswith(".V")) else "USD",
@@ -277,7 +283,7 @@ def main() -> None:
 
     with t6:
         st.subheader("🏠 房貸追蹤與年度收支手動填寫")
-        
+
         col_in_man, col_ex_man, col_save_btn = st.columns([1.5, 1.5, 1])
         with col_in_man:
             manual_annual_inc = st.number_input("今年累積總收入 (CAD)", value=float(cfg.get("annual_income_manual", 77766.46)), step=1000.0, key="man_inc")
@@ -295,7 +301,7 @@ def main() -> None:
         m_inc = manual_annual_inc / 12.0
         m_exp = manual_annual_exp / 12.0
         m_surplus = m_inc - m_exp
-        
+
         st.markdown("---")
         c_i, c_e, c_s = st.columns(3)
         c_i.metric("平均每月收入", f"CAD ${m_inc:,.2f}")
@@ -333,21 +339,21 @@ def main() -> None:
             st.rerun()
 
         st.markdown("---")
-        
+
         # --- 動態風險配置比例對照（低風險 = 4個月開銷基準） ---
         st.markdown("### 🎯 風險資產配置對照（低風險 = 4 個月開銷基準）")
-        
+
         monthly_exp = manual_annual_exp / 12.0
         low_target = monthly_exp * 4.0  # 4個月開銷
-        
+
         actual_low = sum(r.market_value for r in res.holdings if "低" in r.risk_level or "Low" in r.risk_level) + cash_savings
         actual_med = sum(r.market_value for r in res.holdings if "中" in r.risk_level or "Medium" in r.risk_level)
         actual_high = sum(r.market_value for r in res.holdings if "高" in r.risk_level or "High" in r.risk_level)
-        
+
         remaining_balance = max(0.0, total_assets - low_target)
         med_target = remaining_balance * 0.50
         high_target = remaining_balance * 0.50
-        
+
         total_portfolio = total_assets
         low_pct = (actual_low / total_portfolio * 100) if total_portfolio > 0 else 0.0
         med_pct = (actual_med / total_portfolio * 100) if total_portfolio > 0 else 0.0
@@ -357,10 +363,19 @@ def main() -> None:
         diff_med = actual_med - med_target
         diff_high = actual_high - high_target
 
+        # 修正：st.metric 第三個位置參數就是 delta，
+        # 原本同時傳入位置參數與 delta= 關鍵字造成 TypeError。
+        # 現在只傳一個 delta，目標金額改用 caption 顯示。
         cr1, cr2, cr3 = st.columns(3)
-        cr1.metric("低風險 (4個月開銷基準)", f"CAD ${actual_low:,.2f} ({low_pct:.1f}%)", f"目標: ${low_target:,.2f} (4個月)", delta=f"${diff_low:+,.2f}")
-        cr2.metric("中風險 (剩餘資產 50%)", f"CAD ${actual_med:,.2f} ({med_pct:.1f}%)", f"目標: ${med_target:,.2f}", delta=f"${diff_med:+,.2f}")
-        cr3.metric("高風險 (剩餘資產 50%)", f"CAD ${actual_high:,.2f} ({high_pct:.1f}%)", f"目標: ${high_target:,.2f}", delta=f"${diff_high:+,.2f}")
+        with cr1:
+            st.metric("低風險 (4個月開銷基準)", f"CAD ${actual_low:,.2f} ({low_pct:.1f}%)", delta=f"{fmt_signed(diff_low)} vs 目標")
+            st.caption(f"目標：${low_target:,.2f}（4 個月開銷）")
+        with cr2:
+            st.metric("中風險 (剩餘資產 50%)", f"CAD ${actual_med:,.2f} ({med_pct:.1f}%)", delta=f"{fmt_signed(diff_med)} vs 目標")
+            st.caption(f"目標：${med_target:,.2f}")
+        with cr3:
+            st.metric("高風險 (剩餘資產 50%)", f"CAD ${actual_high:,.2f} ({high_pct:.1f}%)", delta=f"{fmt_signed(diff_high)} vs 目標")
+            st.caption(f"目標：${high_target:,.2f}")
 
 
 if __name__ == "__main__":
