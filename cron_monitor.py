@@ -86,21 +86,25 @@ def main():
     held_syms = {h.symbol for h in res.holdings}
 
     for sym, items in by_sym.items():
-        has_danger = any(a.level == "danger" for a in items)
+        has_danger = any(a.level == "danger" and not a.is_advice for a in items)
+        advice = next((a for a in items if a.is_advice), None)
+        advice_actionable = advice is not None and advice.level in ("danger", "warn")
         setup = valid_setups.get(sym)
-        if not has_danger and setup is None:
-            continue  # 只推播停損（danger）與買點，其餘預警僅顯示於網頁
+        if not has_danger and setup is None and not advice_actionable:
+            continue  # 只推播停損、買點與需要動作的建議（減碼／停利／出場），其餘僅顯示於網頁
 
         role = "持倉" if sym in held_syms else "自選"
         lines = [f"📌 *{sym}*（{role}）"]
         for a in items:
-            if a.level == "danger":
+            if a.level == "danger" and not a.is_advice:
                 lines.append("• " + a.text.replace(f"{sym} ", "", 1))
         if setup is not None:
             lines.append(
                 f"• 🟢 買點訊號：現價 `${setup.price:.2f}` CAD，{setup.trigger}\n"
                 f"   建議停損 `${setup.stop:.2f}`｜RRR `{setup.rrr:.2f}`"
             )
+        if advice is not None and (advice_actionable or sym in held_syms):
+            lines.append("• " + advice.text.replace(f"{sym} ", "", 1))
         send_telegram_alert("\n".join(lines), token, chat_id)
         sent_count += 1
 
