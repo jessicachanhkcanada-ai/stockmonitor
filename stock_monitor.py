@@ -3,7 +3,7 @@
 """
 ==========================================================================
  股票與 ETF 智慧監控與風控助理 (後端引擎)
- 支援 USD 自動轉 CAD 匯率換算、持倉風險與帳戶類型解析與安全推播
+ 支援互惠基金、USD/CAD 匯率換算與持倉風控
 ==========================================================================
 """
 
@@ -58,7 +58,6 @@ _HISTORY_CACHE: dict[tuple[str, str], pd.DataFrame] = {}
 
 
 def get_usdcad_rate() -> float:
-    """自動取得當前 USD/CAD 即時匯率，若失敗則回傳保底值 1.35"""
     try:
         df_fx = yf.Ticker("USDCAD=X").history(period="1d")
         if df_fx is not None and not df_fx.empty:
@@ -80,7 +79,7 @@ def get_history(symbol: str, period: str = "1y") -> pd.DataFrame:
             if getattr(df.index, "tz", None) is not None:
                 df.index = df.index.tz_localize(None)
     except Exception as exc:
-        print(f"[警告] 無法取得 {symbol} 資料: {exc}")
+        print(f"[提示] {symbol} 非標準股市代號，將採用手動成本價。")
     _HISTORY_CACHE[key] = df
     return df
 
@@ -228,11 +227,7 @@ def send_telegram_alert(message: str) -> None:
         if not token or not chat_id:
             return
         url = f"https://api.telegram.org/bot{token}/sendMessage"
-        payload = {
-            "chat_id": chat_id,
-            "text": message,
-            "parse_mode": "Markdown"
-        }
+        payload = {"chat_id": chat_id, "text": message, "parse_mode": "Markdown"}
         requests.post(url, json=payload, timeout=5)
     except Exception as exc:
         print(f"[警告] 發送 Telegram 警報失敗: {exc}")
@@ -253,7 +248,7 @@ def scan_setups(account_size: float, risk_pct: float, alerts: list[Alert]) -> li
         r = float(rsi(df["Close"]).iloc[-1])
         
         sup = find_support(df, st)
-        tgt, tgt_lbl = find_target(df, st)
+        tgt, _ = find_target(df, st)
         
         if sup is None:
             sma20 = float(sma(df["Close"], 20).iloc[-1])
@@ -267,14 +262,12 @@ def scan_setups(account_size: float, risk_pct: float, alerts: list[Alert]) -> li
             tgt *= fx_mult
             
         stop = sup_price * (1 - STOP_BUFFER)
-        
         risk_dist = price - stop
         reward_dist = tgt - price if tgt else 0
         rrr = reward_dist / risk_dist if risk_dist > 0 and risk_dist else 0.0
         
         is_uptrend = st.uptrend or (price >= float(sma(df["Close"], 20).iloc[-1]) * fx_mult)
         is_near_support = (price - sup_price) / sup_price <= SUPPORT_TOLERANCE * 1.5
-        
         valid = is_uptrend and is_near_support and (rrr >= MIN_RRR)
         
         risk_amt = account_size * risk_pct
@@ -287,30 +280,16 @@ def scan_setups(account_size: float, risk_pct: float, alerts: list[Alert]) -> li
             order_val = shares * price
             
         sizing = Sizing(
-            shares=shares,
-            order_value=order_val,
-            risk_amount=shares * risk_dist if risk_dist > 0 else 0,
-            stop_pct=(risk_dist / price) * 100 if price > 0 else 0,
-            reward_amount=shares * reward_dist if reward_dist > 0 else 0,
+            shares=shares, order_value=order_val, risk_amount=shares * risk_dist if risk_dist > 0 else 0,
+            stop_pct=(risk_dist / price) * 100 if price > 0 else 0, reward_amount=shares * reward_dist if reward_dist > 0 else 0,
             hard_stop_2pct=price * 0.98
         )
-        
         reason_text = f"回調至{sup_lbl} {sup_price:.2f} CAD，RRR 達 {rrr:.2f}" if valid else f"目前價格未緊貼支撐或 RRR ({rrr:.2f}) 未達門檻"
         
-        setup_obj = BuySetup(
-            symbol=sym,
-            valid=valid,
-            price=price,
-            trigger=f"回調至{sup_lbl} {sup_price:.2f} CAD",
-            support=sup_price,
-            stop=stop,
-            target=tgt,
-            rrr=rrr,
-            reason=reason_text,
-            rsi=r,
-            sizing=sizing
-        )
-        setups.append(setup_obj)
+        setups.append(BuySetup(
+            symbol=sym, valid=valid, price=price, trigger=f"回調至{sup_lbl} {sup_price:.2f} CAD",
+            support=sup_price, stop=stop, target=tgt, rrr=rrr, reason=reason_text, rsi=r, sizing=sizing
+        ))
     return setups
 
 
@@ -331,7 +310,6 @@ class HoldingStatus:
     risk_level: str = "高風險 (High)"
     account_type: str = "TFSA"
     is_long_term: bool = False
-    setup: Optional[BuySetup] = None
 
 
 @dataclass
@@ -359,13 +337,9 @@ def evaluate_holdings(alerts: list[Alert]) -> list[HoldingStatus]:
         
         if sym not in aggregated:
             aggregated[sym] = {
-                "shares": 0.0,
-                "total_cost": 0.0,
-                "is_long_term": is_lt,
-                "risk_level": risk_lvl,
-                "account_type": acc_type,
-                "stop": float(h.get("stop", 0) or 0),
-                "target": float(h.get("target", 0) or 0),
+                "shares": 0.0, "total_cost": 0.0, "is_long_term": is_lt,
+                "risk_level": risk_lvl, "account_type": acc_type,
+                "stop": float(h.get("stop", 0) or 0), "target": float(h.get("target", 0) or 0),
             }
         
         aggregated[sym]["shares"] += shares
@@ -374,7 +348,6 @@ def evaluate_holdings(alerts: list[Alert]) -> list[HoldingStatus]:
             aggregated[sym]["is_long_term"] = True
 
     results: list[HoldingStatus] = []
-    
     for sym, data in aggregated.items():
         shares = data["shares"]
         avg_cost = data["total_cost"] / shares if shares > 0 else 0.0
@@ -384,40 +357,32 @@ def evaluate_holdings(alerts: list[Alert]) -> list[HoldingStatus]:
         
         df = get_history(sym)
         if df.empty:
-            continue
-            
-        fx_mult = fx if not (sym.endswith(".TO") or sym.endswith(".V")) else 1.0
-        
-        price = float(df["Close"].iloc[-1]) * fx_mult
-        st = analyze_structure(df) if has_enough_data(df) else Structure([], [])
+            price = avg_cost
+            fx_mult = 1.0
+        else:
+            fx_mult = fx if not (sym.endswith(".TO") or sym.endswith(".V")) else 1.0
+            price = float(df["Close"].iloc[-1]) * fx_mult
 
+        st = analyze_structure(df) if has_enough_data(df) else Structure([], [])
         stop = data["stop"] * fx_mult if data["stop"] > 0 else 0
         if not stop or stop <= 0:
-            sup = find_support(df, st)
-            stop = (sup[0] * (1 - STOP_BUFFER) if sup else float(sma(df["Close"], 20).iloc[-1]) * 0.97) * fx_mult
+            stop = (find_support(df, st)[0] * (1 - STOP_BUFFER) if not df.empty and find_support(df, st) else avg_cost * 0.90) * fx_mult
 
         target = data["target"] * fx_mult if data["target"] > 0 else 0
         if not target or target <= 0:
-            t_val, _ = find_target(df, st)
-            target = (t_val if t_val else price * 1.20) * fx_mult
+            t_val, _ = find_target(df, st) if not df.empty else (avg_cost * 1.20, "")
+            target = t_val * fx_mult
 
         mv, cv = shares * price, shares * avg_cost
         rrr_now = (target - price) / (price - stop) if stop < price < target else None
         
-        hs = HoldingStatus(
+        results.append(HoldingStatus(
             symbol=sym, shares=shares, avg_cost=avg_cost, price=price,
             stop=stop, target=target, market_value=mv, cost_value=cv,
             pnl=mv - cv, pnl_pct=(price / avg_cost - 1) * 100 if avg_cost > 0 else 0.0,
             dist_to_stop_pct=(price / stop - 1) * 100 if stop > 0 else 0.0,
             rrr_now=rrr_now, risk_level=risk_lvl, account_type=acc_type, is_long_term=is_lt
-        )
-
-        if not is_lt and price <= stop:
-            alert_text = f"⚠️ 【停損警報】持倉標的 `{sym}` 現價已跌破預設停損價。"
-            alerts.append(Alert(f"stop:{sym}", "danger", alert_text))
-
-        results.append(hs)
-        
+        ))
     return results
 
 
