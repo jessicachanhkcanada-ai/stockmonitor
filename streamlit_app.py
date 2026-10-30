@@ -111,6 +111,11 @@ def auto_detect_risk(sym: str) -> str:
         return "高風險 (High)"
 
 
+def md(text: str) -> str:
+    """Streamlit 的 Markdown 會把成對的 $...$ 當成 LaTeX 公式（造成斜體亂碼），顯示前先轉義 $。"""
+    return text.replace("$", "\\$")
+
+
 def fmt_signed(value: float) -> str:
     """格式化正負金額，例如 +$1,234.00 / -$1,234.00"""
     sign = "+" if value >= 0 else "-"
@@ -380,7 +385,7 @@ def main() -> None:
             )
 
             for a in global_alerts:
-                (st.warning if a.level == "warn" else st.error if a.level == "danger" else st.info)(a.text)
+                (st.warning if a.level == "warn" else st.error if a.level == "danger" else st.info)(md(a.text))
 
             box = {"danger": st.error, "warn": st.warning, "info": st.info, "success": st.success}
             for sym, items in by_sym.items():
@@ -397,7 +402,7 @@ def main() -> None:
                     icon = {"danger": "🔴", "warn": "🟠", "success": "🟢"}.get(advice.level, "⚪")
                     body = advice.text.split("】", 1)[-1]
                     lines.append(f"\n**🧭 規則建議：{icon} {advice.action}**\n\n{body}")
-                box.get(worst, st.info)("\n".join(lines))
+                box.get(worst, st.info)(md("\n".join(lines)))
 
     with t5:
         st.subheader("📈 互動圖表")
@@ -560,13 +565,13 @@ def main() -> None:
         cr1, cr2, cr3 = st.columns(3)
         with cr1:
             st.metric("低風險 (4個月開銷基準)", f"CAD ${actual_low:,.2f} ({low_pct:.1f}%)", delta=f"{fmt_signed(diff_low)} vs 目標")
-            st.caption(f"目標：${low_target:,.2f}（4 個月開銷）")
+            st.caption(md(f"目標：${low_target:,.2f}（4 個月開銷）"))
         with cr2:
             st.metric("中風險 (剩餘資產 50%)", f"CAD ${actual_med:,.2f} ({med_pct:.1f}%)", delta=f"{fmt_signed(diff_med)} vs 目標")
-            st.caption(f"目標：${med_target:,.2f}")
+            st.caption(md(f"目標：${med_target:,.2f}"))
         with cr3:
             st.metric("高風險 (剩餘資產 50%)", f"CAD ${actual_high:,.2f} ({high_pct:.1f}%)", delta=f"{fmt_signed(diff_high)} vs 目標")
-            st.caption(f"目標：${high_target:,.2f}")
+            st.caption(md(f"目標：${high_target:,.2f}"))
 
 
 if __name__ == "__main__":
