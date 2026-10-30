@@ -45,6 +45,8 @@ FEAR_GREED_PANIC = 25
 RSI_OVERSOLD = 30
 FEAR_GREED_MANUAL: Optional[float] = None
 
+NEAR_STOP_WARN_PCT = 3.0  # 距離停損 3% 以內發出預警
+
 LEVERAGED_MAP = {
     "TQQQ": ("QQQ", 3), "QLD": ("QQQ", 2),
     "SOXL": ("SMH", 3),
@@ -138,6 +140,10 @@ class Structure:
     def uptrend(self) -> bool:
         return self.hh and self.hl
 
+    @property
+    def downtrend(self) -> bool:
+        return self.lh and self.ll
+
 
 def analyze_structure(df: pd.DataFrame) -> Structure:
     highs, lows = find_swings(df)
@@ -149,6 +155,13 @@ def analyze_structure(df: pd.DataFrame) -> Structure:
         st.hl = lows[-1].price > lows[-2].price
         st.ll = lows[-1].price < lows[-2].price
     return st
+
+
+@dataclass
+class Alert:
+    key: str
+    level: str  # danger / warn / info / success
+    text: str
 
 
 @dataclass
@@ -175,8 +188,82 @@ class MacroSnapshot:
     panic_alert: bool = False
 
 
+def _fetch_fear_greed() -> tuple[Optional[float], str]:
+    """優先使用手動值，其次嘗試 CNN，失敗則回傳 None。"""
+    if FEAR_GREED_MANUAL is not None:
+        return float(FEAR_GREED_MANUAL), "手動設定"
+    try:
+        url = "https://production.dataviz.cnn.io/index/fearandgreed/graphdata"
+        resp = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=5)
+        if resp.status_code == 200:
+            score = resp.json()["fear_and_greed"]["score"]
+            return float(score), "CNN"
+    except Exception:
+        pass
+    return None, "無法取得"
+
+
+def _index_status(sym: str) -> Optional[IndexStatus]:
+    df = get_history(sym)
+    if not has_enough_data(df, 30):
+        return None
+    close = df["Close"]
+    c = float(close.iloc[-1])
+    s20 = float(sma(close, 20).iloc[-1])
+    st = analyze_structure(df)
+    r = float(rsi(close).iloc[-1])
+    above = c >= s20
+    if st.uptrend and above:
+        label = "🟢 強勢多頭"
+    elif above:
+        label = "🟡 偏多"
+    elif st.downtrend:
+        label = "🔴 空頭結構"
+    else:
+        label = "🟠 偏空/整理"
+    return IndexStatus(sym, c, s20, above, st, r, label)
+
+
 def build_macro_snapshot() -> MacroSnapshot:
-    return MacroSnapshot(None, None, 50.0, "預設")
+    # VIX
+    vix = vix_prev = None
+    vdf = get_history("^VIX", "3mo")
+    if has_enough_data(vdf, 2):
+        vix = float(vdf["Close"].iloc[-1])
+        vix_prev = float(vdf["Close"].iloc[-2])
+
+    fg, fg_src = _fetch_fear_greed()
+
+    indices = [s for s in (_index_status(b) for b in BENCHMARKS) if s is not None]
+
+    # 恐慌評分
+    hits: list[str] = []
+    if vix is not None and vix >= VIX_PANIC:
+        hits.append(f"VIX {vix:.1f} ≥ {VIX_PANIC}")
+    if fg is not None and fg <= FEAR_GREED_PANIC:
+        hits.append(f"恐懼貪婪指數 {fg:.0f} ≤ {FEAR_GREED_PANIC}")
+    oversold = [i.symbol for i in indices if i.rsi <= RSI_OVERSOLD]
+    if oversold:
+        hits.append(f"RSI 超賣：{', '.join(oversold)}")
+
+    # 市場體制
+    if indices:
+        n_above = sum(1 for i in indices if i.above20)
+        n_down = sum(1 for i in indices if i.structure.downtrend)
+        if n_above == len(indices):
+            regime = "多頭（偏好順勢回調買入）"
+        elif n_above == 0 or n_down >= 2:
+            regime = "空頭／高風險（降低倉位、嚴守停損）"
+        else:
+            regime = "震盪（縮小倉位、等待確認）"
+    else:
+        regime = "資料不足，無法判斷"
+
+    return MacroSnapshot(
+        vix=vix, vix_prev=vix_prev, fear_greed=fg, fg_source=fg_src,
+        indices=indices, regime=regime,
+        panic_score=len(hits), panic_hits=hits, panic_alert=len(hits) >= 2,
+    )
 
 
 @dataclass
@@ -241,15 +328,15 @@ def scan_setups(account_size: float, risk_pct: float, alerts: list[Alert]) -> li
         if not has_enough_data(df):
             setups.append(BuySetup(symbol=sym, valid=False, reason="歷史資料不足 60 根 K 線"))
             continue
-            
+
         fx_mult = fx if not (sym.endswith(".TO") or sym.endswith(".V")) else 1.0
         price = float(df["Close"].iloc[-1]) * fx_mult
         st = analyze_structure(df)
         r = float(rsi(df["Close"]).iloc[-1])
-        
+
         sup = find_support(df, st)
         tgt, _ = find_target(df, st)
-        
+
         if sup is None:
             sma20 = float(sma(df["Close"], 20).iloc[-1])
             sup_price = sma20 * 0.98 * fx_mult
@@ -257,39 +344,42 @@ def scan_setups(account_size: float, risk_pct: float, alerts: list[Alert]) -> li
         else:
             sup_price, sup_lbl = sup
             sup_price *= fx_mult
-            
+
         if tgt:
             tgt *= fx_mult
-            
+
         stop = sup_price * (1 - STOP_BUFFER)
         risk_dist = price - stop
         reward_dist = tgt - price if tgt else 0
-        rrr = reward_dist / risk_dist if risk_dist > 0 and risk_dist else 0.0
-        
+        rrr = reward_dist / risk_dist if risk_dist > 0 and reward_dist > 0 else 0.0
+
         is_uptrend = st.uptrend or (price >= float(sma(df["Close"], 20).iloc[-1]) * fx_mult)
         is_near_support = (price - sup_price) / sup_price <= SUPPORT_TOLERANCE * 1.5
         valid = is_uptrend and is_near_support and (rrr >= MIN_RRR)
-        
+
         risk_amt = account_size * risk_pct
         shares = int(risk_amt / risk_dist) if risk_dist > 0 else 0
         order_val = shares * price
-        
+
         max_pos_val = account_size * MAX_POSITION_PCT
         if order_val > max_pos_val:
             shares = int(max_pos_val / price) if price > 0 else 0
             order_val = shares * price
-            
+
         sizing = Sizing(
             shares=shares, order_value=order_val, risk_amount=shares * risk_dist if risk_dist > 0 else 0,
             stop_pct=(risk_dist / price) * 100 if price > 0 else 0, reward_amount=shares * reward_dist if reward_dist > 0 else 0,
             hard_stop_2pct=price * 0.98
         )
         reason_text = f"回調至{sup_lbl} {sup_price:.2f} CAD，RRR 達 {rrr:.2f}" if valid else f"目前價格未緊貼支撐或 RRR ({rrr:.2f}) 未達門檻"
-        
+
         setups.append(BuySetup(
             symbol=sym, valid=valid, price=price, trigger=f"回調至{sup_lbl} {sup_price:.2f} CAD",
             support=sup_price, stop=stop, target=tgt, rrr=rrr, reason=reason_text, rsi=r, sizing=sizing
         ))
+
+        if valid:
+            alerts.append(Alert(f"buy_{sym}", "success", f"🟢 {sym} 符合買點：{reason_text}"))
     return setups
 
 
@@ -312,13 +402,6 @@ class HoldingStatus:
     is_long_term: bool = False
 
 
-@dataclass
-class Alert:
-    key: str
-    level: str
-    text: str
-
-
 def evaluate_holdings(alerts: list[Alert]) -> list[HoldingStatus]:
     fx = get_usdcad_rate()
     aggregated = {}
@@ -330,18 +413,18 @@ def evaluate_holdings(alerts: list[Alert]) -> list[HoldingStatus]:
         cost = float(h.get("avg_cost", 0))
         if shares <= 0 or cost <= 0:
             continue
-            
+
         is_lt = bool(h.get("is_long_term", False))
         risk_lvl = str(h.get("risk_level", "高風險 (High)"))
         acc_type = str(h.get("account_type", "TFSA"))
-        
+
         if sym not in aggregated:
             aggregated[sym] = {
                 "shares": 0.0, "total_cost": 0.0, "is_long_term": is_lt,
                 "risk_level": risk_lvl, "account_type": acc_type,
                 "stop": float(h.get("stop", 0) or 0), "target": float(h.get("target", 0) or 0),
             }
-        
+
         aggregated[sym]["shares"] += shares
         aggregated[sym]["total_cost"] += shares * cost
         if is_lt:
@@ -354,8 +437,9 @@ def evaluate_holdings(alerts: list[Alert]) -> list[HoldingStatus]:
         is_lt = data["is_long_term"]
         risk_lvl = data["risk_level"]
         acc_type = data["account_type"]
-        
+
         df = get_history(sym)
+        has_live = not df.empty
         if df.empty:
             price = avg_cost
             fx_mult = 1.0
@@ -366,7 +450,8 @@ def evaluate_holdings(alerts: list[Alert]) -> list[HoldingStatus]:
         st = analyze_structure(df) if has_enough_data(df) else Structure([], [])
         stop = data["stop"] * fx_mult if data["stop"] > 0 else 0
         if not stop or stop <= 0:
-            stop = (find_support(df, st)[0] * (1 - STOP_BUFFER) if not df.empty and find_support(df, st) else avg_cost * 0.90) * fx_mult
+            sup = find_support(df, st) if not df.empty else None
+            stop = (sup[0] * (1 - STOP_BUFFER) if sup else avg_cost * 0.90) * fx_mult
 
         target = data["target"] * fx_mult if data["target"] > 0 else 0
         if not target or target <= 0:
@@ -375,14 +460,31 @@ def evaluate_holdings(alerts: list[Alert]) -> list[HoldingStatus]:
 
         mv, cv = shares * price, shares * avg_cost
         rrr_now = (target - price) / (price - stop) if stop < price < target else None
-        
+        dist_stop = (price / stop - 1) * 100 if stop > 0 else 0.0
+
         results.append(HoldingStatus(
             symbol=sym, shares=shares, avg_cost=avg_cost, price=price,
             stop=stop, target=target, market_value=mv, cost_value=cv,
             pnl=mv - cv, pnl_pct=(price / avg_cost - 1) * 100 if avg_cost > 0 else 0.0,
-            dist_to_stop_pct=(price / stop - 1) * 100 if stop > 0 else 0.0,
+            dist_to_stop_pct=dist_stop,
             rrr_now=rrr_now, risk_level=risk_lvl, account_type=acc_type, is_long_term=is_lt
         ))
+
+        # 警報（僅針對有即時報價的標的；互惠基金無報價不觸發）
+        if has_live and not is_lt:
+            if price <= stop:
+                alerts.append(Alert(f"stop_{sym}", "danger",
+                                    f"🔴 {sym} 現價 {price:.2f} CAD 已跌破停損價 {stop:.2f} CAD，請檢視是否出場"))
+            elif dist_stop <= NEAR_STOP_WARN_PCT:
+                alerts.append(Alert(f"nearstop_{sym}", "warn",
+                                    f"🟠 {sym} 距離停損僅 {dist_stop:.1f}%（現價 {price:.2f}／停損 {stop:.2f} CAD）"))
+            if price >= target:
+                alerts.append(Alert(f"target_{sym}", "info",
+                                    f"🎯 {sym} 現價 {price:.2f} CAD 已達目標價 {target:.2f} CAD，可考慮分批停利"))
+        if sym in LEVERAGED_MAP:
+            ref, mult = LEVERAGED_MAP[sym]
+            alerts.append(Alert(f"lev_{sym}", "warn",
+                                f"⚡ {sym} 為 {mult} 倍槓桿 ETF（追蹤 {ref}），長期持有有波動耗損，建議短線操作並嚴設停損"))
     return results
 
 
@@ -397,6 +499,9 @@ class AnalysisResult:
 def run_analysis(account_size: float = ACCOUNT_SIZE, risk_pct: float = MAX_RISK_PCT) -> AnalysisResult:
     alerts: list[Alert] = []
     macro = build_macro_snapshot()
+    if macro.panic_alert:
+        alerts.append(Alert("panic", "warn",
+                            "😱 市場恐慌訊號：" + "；".join(macro.panic_hits) + "（分批布局，勿一次重倉）"))
     holdings = evaluate_holdings(alerts)
     setups = scan_setups(account_size, risk_pct, alerts)
     return AnalysisResult(macro=macro, setups=setups, holdings=holdings, alerts=alerts)
