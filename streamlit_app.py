@@ -353,14 +353,14 @@ def main() -> None:
         med_pct = (actual_med / total_portfolio * 100) if total_portfolio > 0 else 0.0
         high_pct = (actual_high / total_portfolio * 100) if total_portfolio > 0 else 0.0
 
-        diff_low = float(actual_low - low_target)
-        diff_med = float(actual_med - med_target)
-        diff_high = float(actual_high - high_target)
+        diff_low = actual_low - low_target
+        diff_med = actual_med - med_target
+        diff_high = actual_high - high_target
 
         cr1, cr2, cr3 = st.columns(3)
-        cr1.metric("低風險 (4個月開銷基準)", f"CAD ${actual_low:,.2f} ({low_pct:.1f}%)", f"目標: ${low_target:,.2f} (4個月)", delta=diff_low)
-        cr2.metric("中風險 (剩餘資產 50%)", f"CAD ${actual_med:,.2f} ({med_pct:.1f}%)", f"目標: ${med_target:,.2f}", delta=diff_med)
-        cr3.metric("高風險 (剩餘資產 50%)", f"CAD ${actual_high:,.2f} ({high_pct:.1f}%)", f"目標: ${high_target:,.2f}", delta=diff_high)
+        cr1.metric("低風險 (4個月開銷基準)", f"CAD ${actual_low:,.2f} ({low_pct:.1f}%)", f"目標: ${low_target:,.2f} (4個月)", delta=f"${diff_low:+,.2f}")
+        cr2.metric("中風險 (剩餘資產 50%)", f"CAD ${actual_med:,.2f} ({med_pct:.1f}%)", f"目標: ${med_target:,.2f}", delta=f"${diff_med:+,.2f}")
+        cr3.metric("高風險 (剩餘資產 50%)", f"CAD ${actual_high:,.2f} ({high_pct:.1f}%)", f"目標: ${high_target:,.2f}", delta=f"${diff_high:+,.2f}")
 
 
 if __name__ == "__main__":
