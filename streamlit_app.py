@@ -117,6 +117,41 @@ def fmt_signed(value: float) -> str:
     return f"{sign}${abs(value):,.2f}"
 
 
+USD_BG = "background-color: rgba(59,130,246,0.22); font-weight: 600;"   # 藍色 = USD
+CAD_BG = "background-color: rgba(239,68,68,0.20); font-weight: 600;"    # 紅色 = CAD
+
+
+def symbol_currency(sym: str) -> str:
+    """回傳標的原始交易幣別：.TO / .V 為 CAD，其餘為 USD；無報價的互惠基金視為 CAD(手動)。"""
+    sym = sym.upper()
+    if sym.endswith(".TO") or sym.endswith(".V"):
+        return "CAD"
+    if sm.get_history(sym).empty:
+        return "CAD(手動)"
+    return "USD"
+
+
+def currency_badge(cur: str) -> str:
+    return "🇺🇸 USD" if cur == "USD" else ("🇨🇦 CAD" if cur == "CAD" else "🇨🇦 CAD（手動）")
+
+
+def native_price_text(cur: str, cad_price: float, fx: float) -> str:
+    """把 CAD 價格還原成原幣文字，例如 US$698.12 / C$47.13。"""
+    if cad_price is None or (isinstance(cad_price, float) and math.isnan(cad_price)):
+        return "—"
+    if cur == "USD":
+        return f"US${cad_price / fx:,.2f}"
+    return f"C${cad_price:,.2f}"
+
+
+def style_currency_cols(df: pd.DataFrame, cur_series: list[str], cols: list[str], fmt: dict):
+    """幣別相關欄位依 USD/CAD 上色；數字統一格式化。"""
+    def _tint(col: pd.Series):
+        return [USD_BG if c == "USD" else CAD_BG for c in cur_series]
+    styler = df.style.apply(_tint, subset=cols, axis=0)
+    return styler.format(fmt, na_rep="—")
+
+
 def holdings_to_df(holdings: list[dict]) -> pd.DataFrame:
     for h in holdings:
         if "risk_level" not in h or not h["risk_level"]:
@@ -218,6 +253,11 @@ def main() -> None:
             max_pos = st.number_input("單一標的最大倉位 (%)", min_value=1.0, max_value=100.0, value=float(cfg["max_pos_pct"]), step=1.0)
             min_rrr = st.number_input("最低風險報酬比 RRR", min_value=1.0, max_value=10.0, value=float(cfg["min_rrr"]), step=0.5)
 
+        with st.expander("😱 恐懼貪婪指數（手動覆蓋）", expanded=False):
+            st.caption("CNN 無法連線時可自行輸入（到 cnn.com/markets/fear-and-greed 查看）。")
+            use_manual_fg = st.checkbox("使用手動數值", value=False)
+            manual_fg = st.number_input("恐懼貪婪指數 (0–100)", min_value=0, max_value=100, value=50, step=1)
+
         if st.button("💾 儲存側邊欄設定"):
             to_save = cfg.copy()
             to_save.update({
@@ -237,6 +277,7 @@ def main() -> None:
         "account": account, "risk_pct": risk_pct, "max_pos_pct": max_pos, "min_rrr": min_rrr,
     })
     apply_to_engine(live_cfg)
+    sm.FEAR_GREED_MANUAL = float(manual_fg) if use_manual_fg else None
 
     fx_current = sm.get_usdcad_rate()
     st.title("📈 智慧股票監控與個人財務資產管理")
@@ -283,40 +324,68 @@ def main() -> None:
             st.info("自選股清單是空的，請在側邊欄加入代號。")
         else:
             n_valid = sum(1 for s in res.setups if s.valid)
-            st.caption(f"共掃描 {len(res.setups)} 檔，符合買點 {n_valid} 檔（價格已換算為 CAD）")
+            st.caption(
+                f"共掃描 {len(res.setups)} 檔，符合買點 {n_valid} 檔｜"
+                f"🇺🇸 藍色 = USD 標的（已按 USD/CAD {fx_current:.4f} 換算）｜🇨🇦 紅色 = CAD 標的｜"
+                "標示 (CAD) 的欄位一律為加幣；「現價（原幣）」為該標的實際交易幣別的價格"
+            )
+            cur_s = [("CAD" if (s.symbol.endswith(".TO") or s.symbol.endswith(".V")) else "USD") for s in res.setups]
             rows_s = []
-            for s in res.setups:
+            for s, c in zip(res.setups, cur_s):
                 sz = s.sizing
                 rows_s.append({
                     "代號": s.symbol,
+                    "原幣別": currency_badge(c),
                     "狀態": "✅ 符合" if s.valid else "⏳ 等待",
-                    "現價 (CAD)": None if math.isnan(s.price) else round(s.price, 2),
-                    "支撐": None if s.support is None else round(s.support, 2),
-                    "停損": None if s.stop is None else round(s.stop, 2),
-                    "目標": None if s.target is None else round(s.target, 2),
-                    "RRR": None if s.rrr is None else round(s.rrr, 2),
-                    "RSI": None if math.isnan(s.rsi) else round(s.rsi, 1),
+                    "現價（原幣）": native_price_text(c, s.price, fx_current),
+                    "現價 (CAD)": None if math.isnan(s.price) else s.price,
+                    "支撐 (CAD)": s.support,
+                    "停損 (CAD)": s.stop,
+                    "目標 (CAD)": s.target,
+                    "RRR": s.rrr,
+                    "RSI": None if math.isnan(s.rsi) else s.rsi,
                     "建議股數": sz.shares if sz else None,
-                    "下單金額": None if not sz else round(sz.order_value, 2),
-                    "最大虧損": None if not sz else round(sz.risk_amount, 2),
+                    "下單金額 (CAD)": None if not sz else sz.order_value,
+                    "最大虧損 (CAD)": None if not sz else sz.risk_amount,
                     "說明": s.reason,
                 })
-            st.dataframe(pd.DataFrame(rows_s), hide_index=True)
+            fmt_s = {
+                "現價 (CAD)": "{:,.2f}", "支撐 (CAD)": "{:,.2f}", "停損 (CAD)": "{:,.2f}",
+                "目標 (CAD)": "{:,.2f}", "RRR": "{:.2f}", "RSI": "{:.1f}", "建議股數": "{:,.0f}",
+                "下單金額 (CAD)": "{:,.2f}", "最大虧損 (CAD)": "{:,.2f}",
+            }
+            sty_s = style_currency_cols(pd.DataFrame(rows_s), cur_s, ["原幣別", "現價（原幣）"], fmt_s)
+            st.dataframe(sty_s, hide_index=True)
 
     with t4:
         st.subheader("⚠️ 警報")
         if not res.alerts:
             st.success("✅ 目前沒有觸發任何警報。")
         else:
-            for a in res.alerts:
-                if a.level == "danger":
-                    st.error(a.text)
-                elif a.level == "warn":
-                    st.warning(a.text)
-                elif a.level == "success":
-                    st.success(a.text)
-                else:
-                    st.info(a.text)
+            global_alerts, by_sym = sm.group_alerts(res.alerts)
+            held_syms = {r.symbol for r in res.holdings}
+
+            n_danger = sum(1 for a in res.alerts if a.level == "danger")
+            n_warn = sum(1 for a in res.alerts if a.level == "warn")
+            n_buy = sum(1 for a in res.alerts if a.level == "success")
+            n_info = sum(1 for a in res.alerts if a.level == "info")
+            st.caption(
+                f"共 {len(by_sym)} 檔標的有警報｜🔴 危險 {n_danger}｜🟠 預警 {n_warn}｜"
+                f"🎯 目標 {n_info}｜🟢 買點 {n_buy}（同一標的的警報已合併顯示）"
+            )
+
+            for a in global_alerts:
+                (st.warning if a.level == "warn" else st.error if a.level == "danger" else st.info)(a.text)
+
+            box = {"danger": st.error, "warn": st.warning, "info": st.info, "success": st.success}
+            for sym, items in by_sym.items():
+                worst = items[0].level  # 已依嚴重度排序
+                cur = symbol_currency(sym)
+                role = "💼 持倉" if sym in held_syms else "👀 自選"
+                lines = [f"**{sym}**　{currency_badge(cur)}　·　{role}"]
+                for a in items:
+                    lines.append("- " + a.text.replace(f"{sym} ", "", 1))
+                box.get(worst, st.info)("\n".join(lines))
 
     with t5:
         st.subheader("📈 互動圖表")
@@ -352,22 +421,38 @@ def main() -> None:
             c2.metric("總市值 (CAD)", f"${tv:,.2f}")
             c3.metric("未實現損益 (CAD)", f"${pnl:+,.2f}", f"{(tv / tc - 1) * 100:+.2f}%" if tc else None)
 
+            st.caption(
+                f"🇺🇸 藍色 = USD 標的（已按 USD/CAD {fx_current:.4f} 換算）｜🇨🇦 紅色 = CAD 標的｜"
+                "標示 (CAD) 的欄位一律為加幣；「現價（原幣）」為該標的實際交易幣別的價格"
+            )
+            cur_list = [symbol_currency(r.symbol) for r in rows]
             df_disp = pd.DataFrame([{
                 "代號": r.symbol,
-                "幣別": "CAD" if (r.symbol.endswith(".TO") or r.symbol.endswith(".V")) else "USD",
+                "原幣別": currency_badge(c),
+                "現價（原幣）": native_price_text("USD" if c == "USD" else "CAD", r.price, fx_current),
                 "總股數": r.shares,
-                "加權平均成本": r.avg_cost,
-                "現價": r.price,
-                "總市值": r.market_value,
-                "未實現損益": r.pnl,
-                "損益%": r.pnl_pct,
-                "自動停損價": r.stop,
-                "自動目標價": r.target,
+                "加權平均成本 (CAD)": r.avg_cost,
+                "現價 (CAD)": r.price,
+                "總市值 (CAD)": r.market_value,
+                "未實現損益 (CAD)": r.pnl,
+                "損益 %": r.pnl_pct,
+                "停損價 (CAD)": r.stop,
+                "目標價 (CAD)": r.target,
                 "風險等級": r.risk_level,
                 "帳戶類型": r.account_type,
-                "長線資產": "是" if r.is_long_term else "否"
-            } for r in rows])
-            st.dataframe(df_disp, hide_index=True)
+                "長線資產": "是" if r.is_long_term else "否",
+            } for r, c in zip(rows, cur_list)])
+            fmt_h = {
+                "總股數": "{:,.4f}", "加權平均成本 (CAD)": "{:,.2f}", "現價 (CAD)": "{:,.2f}",
+                "總市值 (CAD)": "{:,.2f}", "未實現損益 (CAD)": "{:+,.2f}", "損益 %": "{:+.2f}%",
+                "停損價 (CAD)": "{:,.2f}", "目標價 (CAD)": "{:,.2f}",
+            }
+            sty = style_currency_cols(df_disp, ["USD" if c == "USD" else "CAD" for c in cur_list],
+                                      ["原幣別", "現價（原幣）"], fmt_h)
+            sty = sty.map(lambda v: "color: #22c55e;" if isinstance(v, (int, float)) and v > 0
+                          else ("color: #ef4444;" if isinstance(v, (int, float)) and v < 0 else ""),
+                          subset=["未實現損益 (CAD)", "損益 %"])
+            st.dataframe(sty, hide_index=True)
         else:
             st.info("目前沒有持倉，請在側邊欄「目前持倉」新增資料後按「儲存側邊欄設定」。")
 
