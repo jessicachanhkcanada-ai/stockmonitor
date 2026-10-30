@@ -80,23 +80,29 @@ def main():
     # 統計發送數量
     sent_count = 0
 
-    # 1. 檢查警報與停損 (Danger Alerts)
-    for alert in res.alerts:
-        if alert.level == "danger":
-            send_telegram_alert(alert.text, token, chat_id)
-            sent_count += 1
+    # 依標的合併：同一檔股票的停損警報與買點訊號合成一則訊息
+    _, by_sym = sm.group_alerts(res.alerts)
+    valid_setups = {s.symbol: s for s in res.setups if s.valid}
+    held_syms = {h.symbol for h in res.holdings}
 
-    # 2. 檢查觀察清單符合買點的標的 (Valid Setups)
-    for setup in res.setups:
-        if setup.valid:
-            msg = (
-                f"🟢 【買點訊號】觀察清單中的 `{setup.symbol}` 現價 `${setup.price:.2f}` 符合買入條件！\n"
-                f"• 觸發原因：{setup.trigger}\n"
-                f"• 建議停損：`${setup.stop:.2f}`\n"
-                f"• 風險報酬比 (RRR)：`{setup.rrr:.2f}`"
+    for sym, items in by_sym.items():
+        has_danger = any(a.level == "danger" for a in items)
+        setup = valid_setups.get(sym)
+        if not has_danger and setup is None:
+            continue  # 只推播停損（danger）與買點，其餘預警僅顯示於網頁
+
+        role = "持倉" if sym in held_syms else "自選"
+        lines = [f"📌 *{sym}*（{role}）"]
+        for a in items:
+            if a.level == "danger":
+                lines.append("• " + a.text.replace(f"{sym} ", "", 1))
+        if setup is not None:
+            lines.append(
+                f"• 🟢 買點訊號：現價 `${setup.price:.2f}` CAD，{setup.trigger}\n"
+                f"   建議停損 `${setup.stop:.2f}`｜RRR `{setup.rrr:.2f}`"
             )
-            send_telegram_alert(msg, token, chat_id)
-            sent_count += 1
+        send_telegram_alert("\n".join(lines), token, chat_id)
+        sent_count += 1
 
     if sent_count == 0:
         print("✅ 監控完成，目前無觸發任何停損或買點警報。")
