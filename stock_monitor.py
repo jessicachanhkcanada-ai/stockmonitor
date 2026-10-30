@@ -163,12 +163,22 @@ class Alert:
     level: str  # danger / warn / info / success
     text: str
     symbol: str = ""  # 所屬標的；留空時會依 key（如 stop_SPCX）自動推導，無對應標的者視為全域警報
+    action: str = ""  # 僅「規則建議」使用：加碼 / 持有 / 減碼 / 出場 / 停利…
 
     def __post_init__(self) -> None:
         if not self.symbol and "_" in self.key:
             prefix, rest = self.key.split("_", 1)
-            if prefix in {"buy", "stop", "nearstop", "target", "lev"}:
+            if prefix in {"buy", "stop", "nearstop", "target", "lev", "advice"}:
                 self.symbol = rest
+
+    @property
+    def is_advice(self) -> bool:
+        return self.key.startswith("advice_")
+
+
+def money(cur: str, value: float) -> str:
+    """依幣別格式化金額：USD → US$1,234.56；CAD → C$1,234.56。"""
+    return f"US${value:,.2f}" if cur == "USD" else f"C${value:,.2f}"
 
 
 ALERT_SEVERITY = {"danger": 0, "warn": 1, "info": 2, "success": 3}
@@ -436,7 +446,11 @@ def scan_setups(account_size: float, risk_pct: float, alerts: list[Alert]) -> li
         ))
 
         if valid:
-            alerts.append(Alert(f"buy_{sym}", "success", f"🟢 {sym} 符合買點：{reason_text}"))
+            cur_s = "CAD" if fx_mult == 1.0 else "USD"
+            alerts.append(Alert(
+                f"buy_{sym}", "success",
+                f"🟢 {sym} 符合買點：回調至{sup_lbl} {money(cur_s, sup_price / fx_mult)}，"
+                f"停損 {money(cur_s, stop / fx_mult)}，目標 {money(cur_s, (tgt or 0) / fx_mult)}，RRR 達 {rrr:.2f}"))
     return setups
 
 
@@ -457,9 +471,22 @@ class HoldingStatus:
     risk_level: str = "高風險 (High)"
     account_type: str = "TFSA"
     is_long_term: bool = False
+    # --- 原幣別資訊（avg_cost/price/stop/target 等欄位皆為 CAD；以下為原幣） ---
+    currency: str = "CAD"           # "USD" 或 "CAD"
+    fx_mult: float = 1.0            # 原幣 → CAD 的乘數（CAD 標的為 1）
+    avg_cost_native: float = 0.0
+    price_native: float = 0.0
+    stop_native: float = 0.0
+    target_native: float = 0.0
+    has_live: bool = True           # 是否有即時報價（互惠基金為 False）
+    rsi: Optional[float] = None
+    trend: str = ""                 # 上升結構 / 下降結構 / 盤整
+    above20: Optional[bool] = None
+    weight_pct: float = 0.0         # 市值占總資金規模的比例
 
 
-def evaluate_holdings(alerts: list[Alert]) -> list[HoldingStatus]:
+def evaluate_holdings(alerts: list[Alert], account_size: Optional[float] = None) -> list[HoldingStatus]:
+    account_size = float(account_size) if account_size else float(ACCOUNT_SIZE)
     fx = get_usdcad_rate()
     aggregated = {}
     for h in HOLDINGS:
@@ -515,34 +542,117 @@ def evaluate_holdings(alerts: list[Alert]) -> list[HoldingStatus]:
             t_val, _ = find_target(df, st) if not df.empty else (avg_cost * 1.20, "")
             target = t_val * fx_mult
 
-        mv, cv = shares * price, shares * avg_cost
+        # 側邊欄輸入的平均成本、停損、目標價皆為「該標的原幣」（USD 標的填美元、.TO 填加幣）
+        currency = "CAD" if (sym.endswith(".TO") or sym.endswith(".V") or not has_live) else "USD"
+        avg_cost_cad = avg_cost * fx_mult          # 成本換算為 CAD，才能與 CAD 市值相比
+        mv, cv = shares * price, shares * avg_cost_cad
         rrr_now = (target - price) / (price - stop) if stop < price < target else None
         dist_stop = (price / stop - 1) * 100 if stop > 0 else 0.0
 
+        if has_enough_data(df):
+            rsi_val: Optional[float] = float(rsi(df["Close"]).iloc[-1])
+            above20: Optional[bool] = bool(float(df["Close"].iloc[-1]) >= float(sma(df["Close"], 20).iloc[-1]))
+            trend = "上升結構" if st.uptrend else ("下降結構" if st.downtrend else "盤整")
+        else:
+            rsi_val, above20, trend = None, None, ""
+
         results.append(HoldingStatus(
-            symbol=sym, shares=shares, avg_cost=avg_cost, price=price,
+            symbol=sym, shares=shares, avg_cost=avg_cost_cad, price=price,
             stop=stop, target=target, market_value=mv, cost_value=cv,
-            pnl=mv - cv, pnl_pct=(price / avg_cost - 1) * 100 if avg_cost > 0 else 0.0,
+            pnl=mv - cv, pnl_pct=(price / avg_cost_cad - 1) * 100 if avg_cost_cad > 0 else 0.0,
             dist_to_stop_pct=dist_stop,
-            rrr_now=rrr_now, risk_level=risk_lvl, account_type=acc_type, is_long_term=is_lt
+            rrr_now=rrr_now, risk_level=risk_lvl, account_type=acc_type, is_long_term=is_lt,
+            currency=currency, fx_mult=fx_mult, avg_cost_native=avg_cost,
+            price_native=price / fx_mult, stop_native=stop / fx_mult, target_native=target / fx_mult,
+            has_live=has_live, rsi=rsi_val, trend=trend, above20=above20,
+            weight_pct=(mv / account_size * 100) if account_size > 0 else 0.0,
         ))
 
-        # 警報（僅針對有即時報價的標的；互惠基金無報價不觸發）
+        # 警報（僅針對有即時報價的標的；互惠基金無報價不觸發）；金額一律以該標的原幣顯示
+        p_n, s_n, t_n = price / fx_mult, stop / fx_mult, target / fx_mult
         if has_live and not is_lt:
             if price <= stop:
                 alerts.append(Alert(f"stop_{sym}", "danger",
-                                    f"🔴 {sym} 現價 {price:.2f} CAD 已跌破停損價 {stop:.2f} CAD，請檢視是否出場"))
+                                    f"🔴 {sym} 現價 {money(currency, p_n)} 已跌破停損價 {money(currency, s_n)}，請檢視是否出場"))
             elif dist_stop <= NEAR_STOP_WARN_PCT:
                 alerts.append(Alert(f"nearstop_{sym}", "warn",
-                                    f"🟠 {sym} 距離停損僅 {dist_stop:.1f}%（現價 {price:.2f}／停損 {stop:.2f} CAD）"))
+                                    f"🟠 {sym} 距離停損僅 {dist_stop:.1f}%（現價 {money(currency, p_n)}／停損 {money(currency, s_n)}）"))
             if price >= target:
                 alerts.append(Alert(f"target_{sym}", "info",
-                                    f"🎯 {sym} 現價 {price:.2f} CAD 已達目標價 {target:.2f} CAD，可考慮分批停利"))
+                                    f"🎯 {sym} 現價 {money(currency, p_n)} 已達目標價 {money(currency, t_n)}，可考慮分批停利"))
         if sym in LEVERAGED_MAP:
             ref, mult = LEVERAGED_MAP[sym]
             alerts.append(Alert(f"lev_{sym}", "warn",
                                 f"⚡ {sym} 為 {mult} 倍槓桿 ETF（追蹤 {ref}），長期持有有波動耗損，建議短線操作並嚴設停損"))
     return results
+
+
+def advise_holding(h: HoldingStatus, setup: Optional[BuySetup], account_size: float) -> Optional[tuple[str, str, str]]:
+    """依使用者自訂的風控規則，對單一持倉給出「加碼 / 持有 / 減碼 / 出場」訊號。
+
+    回傳 (動作, 警報等級, 理由)；無即時報價的資產（互惠基金等）回傳 None。
+    這是規則式訊號，不是投資建議。優先順序：跌破停損 > 達目標 > 超過倉位上限 >
+    接近停損且趨勢轉弱 > 出現買點可加碼 > 獲利後 RSI 偏高 > 持有。
+    """
+    if not h.has_live:
+        return None
+    cur = h.currency
+    p, s, t = h.price_native, h.stop_native, h.target_native
+    max_pct = MAX_POSITION_PCT * 100
+    cap_val = account_size * MAX_POSITION_PCT
+    w = h.weight_pct
+
+    # 1) 跌破停損
+    if h.price <= h.stop:
+        if h.is_long_term:
+            return ("檢視持有理由", "warn",
+                    f"長線資產已跌破參考停損價 {money(cur, s)}（現價 {money(cur, p)}）；請重新評估持有理由，而非機械式停損")
+        return ("減碼／出場", "danger",
+                f"現價 {money(cur, p)} 已跌破停損價 {money(cur, s)}，依停損紀律應減碼或出場")
+
+    # 2) 達目標價
+    if h.price >= h.target:
+        return ("分批停利", "warn",
+                f"現價 {money(cur, p)} 已達目標價 {money(cur, t)}，可考慮分批賣出（如 1/3～1/2）並上移停損保護獲利")
+
+    # 3) 單一標的倉位過大
+    if w > max_pct and h.price > 0:
+        trim = math.ceil((h.market_value - cap_val) / h.price)
+        return ("減碼", "warn",
+                f"倉位占總資金 {w:.1f}%，超過單一標的上限 {max_pct:.0f}%；"
+                f"回到上限需減碼約 {trim} 股（約 {money(cur, trim * p)}）")
+
+    # 4) 接近停損且趨勢轉弱
+    if (not h.is_long_term) and h.dist_to_stop_pct <= NEAR_STOP_WARN_PCT and h.trend == "下降結構":
+        return ("減碼／收緊停損", "warn",
+                f"距停損僅 {h.dist_to_stop_pct:.1f}% 且價格結構為下降（高低點同步下移）；"
+                f"不宜加碼，可先減碼或嚴守停損 {money(cur, s)}")
+
+    # 5) 出現買點 → 可加碼（受倉位上限限制）
+    if setup is not None and setup.valid:
+        room_val = cap_val - h.market_value
+        room_sh = int(room_val / h.price) if (room_val > 0 and h.price > 0) else 0
+        rule_sh = setup.sizing.shares if setup.sizing else 0
+        add = min(rule_sh, room_sh)
+        if add >= 1:
+            setup_stop_n = (setup.stop or h.stop) / h.fx_mult
+            return ("可加碼", "success",
+                    f"出現買點（{setup.trigger.replace(' CAD', '')}，RRR {setup.rrr:.2f}），倉位 {w:.1f}% 低於上限 {max_pct:.0f}%；"
+                    f"依單筆風險規則與倉位上限，最多約加 {add} 股（約 {money(cur, add * p)}），停損 {money(cur, setup_stop_n)}")
+        return ("持有", "info",
+                f"雖有買點，但倉位 {w:.1f}% 已接近上限 {max_pct:.0f}%，沒有加碼空間")
+
+    # 6) 大幅獲利且 RSI 過熱 → 考慮部分停利
+    if h.rsi is not None and h.rsi >= 70 and h.pnl_pct >= 20:
+        return ("持有（可部分停利）", "info",
+                f"已獲利 {h.pnl_pct:.1f}% 且 RSI {h.rsi:.0f} 偏高（過熱），不宜追高加碼；可考慮部分停利，停損 {money(cur, s)}")
+
+    # 7) 其餘：持有
+    extra = f"；距停損 {h.dist_to_stop_pct:.1f}%（停損 {money(cur, s)}）"
+    if h.dist_to_stop_pct <= NEAR_STOP_WARN_PCT:
+        extra += "，接近停損，守住停損價"
+    rsi_txt = f"，RSI {h.rsi:.0f}" if h.rsi is not None else ""
+    return ("持有", "info", f"趨勢：{h.trend or '資料不足'}{rsi_txt}{extra}；目前沒有新的買點，不建議加碼")
 
 
 @dataclass
@@ -559,6 +669,15 @@ def run_analysis(account_size: float = ACCOUNT_SIZE, risk_pct: float = MAX_RISK_
     if macro.panic_alert:
         alerts.append(Alert("panic", "warn",
                             "😱 市場恐慌訊號：" + "；".join(macro.panic_hits) + "（分批布局，勿一次重倉）"))
-    holdings = evaluate_holdings(alerts)
+    holdings = evaluate_holdings(alerts, account_size)
     setups = scan_setups(account_size, risk_pct, alerts)
+
+    # 持倉規則建議（加碼 / 持有 / 減碼 / 出場）；需要同時用到持倉與買點掃描結果
+    setup_map = {s.symbol: s for s in setups}
+    for h in holdings:
+        adv = advise_holding(h, setup_map.get(h.symbol), account_size)
+        if adv is None:
+            continue
+        action, level, reason = adv
+        alerts.append(Alert(f"advice_{h.symbol}", level, f"🧭 {h.symbol} 規則建議【{action}】{reason}", action=action))
     return AnalysisResult(macro=macro, setups=setups, holdings=holdings, alerts=alerts)
