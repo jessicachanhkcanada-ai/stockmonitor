@@ -637,7 +637,7 @@ def advise_holding(h: HoldingStatus, setup: Optional[BuySetup], account_size: fl
         if add >= 1:
             setup_stop_n = (setup.stop or h.stop) / h.fx_mult
             return ("可加碼", "success",
-                    f"出現買點（{setup.trigger.replace(' CAD', '')}，RRR {setup.rrr:.2f}），倉位 {w:.1f}% 低於上限 {max_pct:.0f}%；"
+                    f"出現買點（回調至支撐 {money(cur, (setup.support or h.price) / h.fx_mult)}，RRR {setup.rrr:.2f}），倉位 {w:.1f}% 低於上限 {max_pct:.0f}%；"
                     f"依單筆風險規則與倉位上限，最多約加 {add} 股（約 {money(cur, add * p)}），停損 {money(cur, setup_stop_n)}")
         return ("持有", "info",
                 f"雖有買點，但倉位 {w:.1f}% 已接近上限 {max_pct:.0f}%，沒有加碼空間")
