@@ -3,7 +3,7 @@
 ==========================================================================
  📈 智慧股票監控與個人財務資產管理 — Streamlit 網頁版
  支援互惠基金、USD/CAD 匯率、房貸、4個月開銷低風險基準配置
- 以及 JSON 設定檔匯入/匯出備份（防止雲端重啟遺失資料）
+ 以及 JSON 設定檔匯入/匯出備份與強制清除快取更新報價
 ==========================================================================
 """
 
@@ -226,6 +226,13 @@ def main() -> None:
     with st.sidebar:
         st.title("⚙️ 設定")
 
+        # --- 新增：強制重新整理報價按鈕 ---
+        if st.button("🔄 強制重新整理報價 (清除快取)"):
+            if hasattr(sm, "_HISTORY_CACHE"):
+                sm._HISTORY_CACHE.clear()
+            st.success("已清除歷史報價快取！")
+            st.rerun()
+
         with st.expander("📋 自選股", expanded=False):
             wl_text = st.text_area("代號（用逗號或換行分隔）", value=", ".join(cfg["watchlist"]), height=90)
 
@@ -272,10 +279,9 @@ def main() -> None:
             else:
                 st.error(f"儲存失敗：{err}")
 
-        # --- 新增：設定檔備份與還原專區 ---
+        # --- 設定檔備份與還原專區 ---
         with st.expander("🔄 設定備份與還原 (防雲端重置)", expanded=False):
             st.caption("定期下載備份 JSON 檔。若雲端重置，上傳即可還原全部持倉與設定！")
-            # 匯出按鈕
             current_settings_json = json.dumps(cfg, ensure_ascii=False, indent=2)
             st.download_button(
                 label="📤 下載備份設定 (JSON)",
@@ -283,7 +289,6 @@ def main() -> None:
                 file_name=f"stock_monitor_backup_{dt.date.today().isoformat()}.json",
                 mime="application/json"
             )
-            # 匯入上傳
             uploaded_file = st.file_uploader("📥 上傳備份 JSON 檔還原", type=["json"])
             if uploaded_file is not None:
                 try:
