@@ -2,7 +2,8 @@
 """
 ==========================================================================
  📈 智慧股票監控與個人財務資產管理 — Streamlit 網頁版
- 支援互惠基金、USD/CAD 匯率、房貸與 4 個月開銷低風險基準配置分析
+ 支援互惠基金、USD/CAD 匯率、房貸、4個月開銷低風險基準配置
+ 以及 JSON 設定檔匯入/匯出備份（防止雲端重啟遺失資料）
 ==========================================================================
 """
 
@@ -61,8 +62,9 @@ def default_settings() -> dict:
 def load_settings() -> dict:
     cfg = default_settings()
     try:
-        with open(SETTINGS_FILE, "r", encoding="utf-8") as f:
-            cfg.update(json.load(f))
+        if os.path.exists(SETTINGS_FILE):
+            with open(SETTINGS_FILE, "r", encoding="utf-8") as f:
+                cfg.update(json.load(f))
     except Exception:
         pass
     return cfg
@@ -112,22 +114,19 @@ def auto_detect_risk(sym: str) -> str:
 
 
 def md(text: str) -> str:
-    """Streamlit 的 Markdown 會把成對的 $...$ 當成 LaTeX 公式（造成斜體亂碼），顯示前先轉義 $。"""
     return text.replace("$", "\\$")
 
 
 def fmt_signed(value: float) -> str:
-    """格式化正負金額，例如 +$1,234.00 / -$1,234.00"""
     sign = "+" if value >= 0 else "-"
     return f"{sign}${abs(value):,.2f}"
 
 
-USD_BG = "background-color: rgba(59,130,246,0.22); font-weight: 600;"   # 藍色 = USD
-CAD_BG = "background-color: rgba(239,68,68,0.20); font-weight: 600;"    # 紅色 = CAD
+USD_BG = "background-color: rgba(59,130,246,0.22); font-weight: 600;"
+CAD_BG = "background-color: rgba(239,68,68,0.20); font-weight: 600;"
 
 
 def symbol_currency(sym: str) -> str:
-    """回傳標的原始交易幣別：.TO / .V 為 CAD，其餘為 USD；無報價的互惠基金視為 CAD(手動)。"""
     sym = sym.upper()
     if sym.endswith(".TO") or sym.endswith(".V"):
         return "CAD"
@@ -141,7 +140,6 @@ def currency_badge(cur: str) -> str:
 
 
 def native_price_text(cur: str, cad_price: float, fx: float) -> str:
-    """把 CAD 價格還原成原幣文字，例如 US$698.12 / C$47.13。"""
     if cad_price is None or (isinstance(cad_price, float) and math.isnan(cad_price)):
         return "—"
     if cur == "USD":
@@ -150,7 +148,6 @@ def native_price_text(cur: str, cad_price: float, fx: float) -> str:
 
 
 def style_currency_cols(df: pd.DataFrame, cur_series: list[str], cols: list[str], fmt: dict):
-    """幣別相關欄位依 USD/CAD 上色；數字統一格式化。"""
     def _tint(col: pd.Series):
         return [USD_BG if c == "USD" else CAD_BG for c in cur_series]
     styler = df.style.apply(_tint, subset=cols, axis=0)
@@ -233,7 +230,7 @@ def main() -> None:
             wl_text = st.text_area("代號（用逗號或換行分隔）", value=", ".join(cfg["watchlist"]), height=90)
 
         with st.expander("💼 目前持倉（含互惠基金、風險與帳戶）", expanded=True):
-            st.caption("💡 平均成本、停損價、目標價請填該標的「原幣」：USD 標的（如 PTRN、VOO）填美元，.TO 標的填加幣。互惠基金代號可自訂（如 MF_1），股數填 1，平均成本填總市值金額（CAD）。")
+            st.caption("💡 平均成本、停損價、目標價請填該標的「原幣」。互惠基金代號可自訂，股數填 1，平均成本填總市值金額（CAD）。")
             hold_df = st.data_editor(
                 holdings_to_df(cfg["holdings"]), num_rows="dynamic", key="holdings_editor",
                 column_config={
@@ -259,7 +256,6 @@ def main() -> None:
             min_rrr = st.number_input("最低風險報酬比 RRR", min_value=1.0, max_value=10.0, value=float(cfg["min_rrr"]), step=0.5)
 
         with st.expander("😱 恐懼貪婪指數（手動覆蓋）", expanded=False):
-            st.caption("CNN 無法連線時可自行輸入（到 cnn.com/markets/fear-and-greed 查看）。")
             use_manual_fg = st.checkbox("使用手動數值", value=False)
             manual_fg = st.number_input("恐懼貪婪指數 (0–100)", min_value=0, max_value=100, value=50, step=1)
 
@@ -275,6 +271,31 @@ def main() -> None:
                 st.rerun()
             else:
                 st.error(f"儲存失敗：{err}")
+
+        # --- 新增：設定檔備份與還原專區 ---
+        with st.expander("🔄 設定備份與還原 (防雲端重置)", expanded=False):
+            st.caption("定期下載備份 JSON 檔。若雲端重置，上傳即可還原全部持倉與設定！")
+            # 匯出按鈕
+            current_settings_json = json.dumps(cfg, ensure_ascii=False, indent=2)
+            st.download_button(
+                label="📤 下載備份設定 (JSON)",
+                data=current_settings_json,
+                file_name=f"stock_monitor_backup_{dt.date.today().isoformat()}.json",
+                mime="application/json"
+            )
+            # 匯入上傳
+            uploaded_file = st.file_uploader("📥 上傳備份 JSON 檔還原", type=["json"])
+            if uploaded_file is not None:
+                try:
+                    imported_cfg = json.load(uploaded_file)
+                    err = save_settings(imported_cfg)
+                    if err is None:
+                        st.success("✅ 設定還原成功！正在重新載入...")
+                        st.rerun()
+                    else:
+                        st.error(f"還原失敗：{err}")
+                except Exception as e:
+                    st.error(f"解析 JSON 檔案失敗：{e}")
 
     live_cfg = load_settings()
     live_cfg.update({
@@ -331,8 +352,7 @@ def main() -> None:
             n_valid = sum(1 for s in res.setups if s.valid)
             st.caption(
                 f"共掃描 {len(res.setups)} 檔，符合買點 {n_valid} 檔｜"
-                f"🇺🇸 藍色 = USD 標的（已按 USD/CAD {fx_current:.4f} 換算）｜🇨🇦 紅色 = CAD 標的｜"
-                "標示 (CAD) 的欄位一律為加幣；「現價（原幣）」為該標的實際交易幣別的價格"
+                f"🇺🇸 藍色 = USD 標的（已按 USD/CAD {fx_current:.4f} 換算）｜🇨🇦 紅色 = CAD 標的"
             )
             cur_s = [("CAD" if (s.symbol.endswith(".TO") or s.symbol.endswith(".V")) else "USD") for s in res.setups]
             rows_s = []
@@ -381,7 +401,6 @@ def main() -> None:
             st.caption(
                 f"共 {len(by_sym)} 檔標的｜🔴 危險 {n_danger}｜🟠 預警 {n_warn}｜🟢 買點 {n_buy}｜"
                 f"🧭 持倉建議：可加碼 {n_add}、減碼／出場／停利 {n_cut}、持有 {n_hold}"
-                "（同一標的的警報已合併顯示；建議為規則訊號，非投資建議）"
             )
 
             for a in global_alerts:
@@ -390,12 +409,11 @@ def main() -> None:
             box = {"danger": st.error, "warn": st.warning, "info": st.info, "success": st.success}
             for sym, items in by_sym.items():
                 advice = next((a for a in items if a.is_advice), None)
-                # 已有持倉建議時，買點訊息會併入建議內，不重複顯示
                 shown = [a for a in items if not a.is_advice and not (advice and a.key.startswith("buy_"))]
-                worst = items[0].level  # 已依嚴重度排序（含建議）
+                worst = items[0].level
                 cur = symbol_currency(sym)
                 role = "💼 持倉" if sym in held_syms else "👀 自選"
-                lines = [f"**{sym}**　{currency_badge(cur)}　·　{role}"]
+                lines = [f"**{sym}** {currency_badge(cur)} · {role}"]
                 for a in shown:
                     lines.append("- " + a.text.replace(f"{sym} ", "", 1))
                 if advice is not None:
@@ -439,9 +457,7 @@ def main() -> None:
             c3.metric("未實現損益 (CAD)", f"${pnl:+,.2f}", f"{(tv / tc - 1) * 100:+.2f}%" if tc else None)
 
             st.caption(
-                f"🇺🇸 藍色 = USD 標的（已按 USD/CAD {fx_current:.4f} 換算）｜🇨🇦 紅色 = CAD 標的｜"
-                "「平均成本／現價／停損／目標」為該標的原幣（US$ 或 C$）；"
-                "標示 (CAD) 的欄位為加幣合併數字"
+                f"🇺🇸 藍色 = USD 標的（已按 USD/CAD {fx_current:.4f} 換算）｜🇨🇦 紅色 = CAD 標的"
             )
             advice_map = {a.symbol: a.action for a in res.alerts if a.is_advice}
             cur_list = [r.currency for r in rows]
@@ -473,7 +489,6 @@ def main() -> None:
                           else ("color: #ef4444;" if isinstance(v, (int, float)) and v < 0 else ""),
                           subset=["未實現損益 (CAD)", "損益 %"])
             st.dataframe(sty, hide_index=True)
-            st.caption("🧭「規則建議」依你設定的停損、目標價、倉位上限與買點規則產生，詳細理由請看「⚠️ 警報」分頁；僅供參考，非投資建議。")
         else:
             st.info("目前沒有持倉，請在側邊欄「目前持倉」新增資料後按「儲存側邊欄設定」。")
 
@@ -536,11 +551,10 @@ def main() -> None:
 
         st.markdown("---")
 
-        # --- 動態風險配置比例對照（低風險 = 4個月開銷基準） ---
         st.markdown("### 🎯 風險資產配置對照（低風險 = 4 個月開銷基準）")
 
         monthly_exp = manual_annual_exp / 12.0
-        low_target = monthly_exp * 4.0  # 4個月開銷
+        low_target = monthly_exp * 4.0
 
         actual_low = sum(r.market_value for r in res.holdings if "低" in r.risk_level or "Low" in r.risk_level) + cash_savings
         actual_med = sum(r.market_value for r in res.holdings if "中" in r.risk_level or "Medium" in r.risk_level)
@@ -559,9 +573,6 @@ def main() -> None:
         diff_med = actual_med - med_target
         diff_high = actual_high - high_target
 
-        # 修正：st.metric 第三個位置參數就是 delta，
-        # 原本同時傳入位置參數與 delta= 關鍵字造成 TypeError。
-        # 現在只傳一個 delta，目標金額改用 caption 顯示。
         cr1, cr2, cr3 = st.columns(3)
         with cr1:
             st.metric("低風險 (4個月開銷基準)", f"CAD ${actual_low:,.2f} ({low_pct:.1f}%)", delta=f"{fmt_signed(diff_low)} vs 目標")
