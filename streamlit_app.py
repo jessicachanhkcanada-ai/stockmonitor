@@ -139,12 +139,12 @@ def currency_badge(cur: str) -> str:
     return "🇺🇸 USD" if cur == "USD" else ("🇨🇦 CAD" if cur == "CAD" else "🇨🇦 CAD（手動）")
 
 
-def native_price_text(cur: str, cad_price: float, fx: float) -> str:
-    if cad_price is None or (isinstance(cad_price, float) and math.isnan(cad_price)):
+def native_price_text(cur: str, native_price: float) -> str:
+    if native_price is None or (isinstance(native_price, float) and math.isnan(native_price)):
         return "—"
     if cur == "USD":
-        return f"US${cad_price / fx:,.2f}"
-    return f"C${cad_price:,.2f}"
+        return f"US${native_price:,.2f}"
+    return f"C${native_price:,.2f}"
 
 
 def style_currency_cols(df: pd.DataFrame, cur_series: list[str], cols: list[str], fmt: dict):
@@ -226,7 +226,6 @@ def main() -> None:
     with st.sidebar:
         st.title("⚙️ 設定")
 
-        # --- 新增：強制重新整理報價按鈕 ---
         if st.button("🔄 強制重新整理報價 (清除快取)"):
             if hasattr(sm, "_HISTORY_CACHE"):
                 sm._HISTORY_CACHE.clear()
@@ -279,7 +278,6 @@ def main() -> None:
             else:
                 st.error(f"儲存失敗：{err}")
 
-        # --- 設定檔備份與還原專區 ---
         with st.expander("🔄 設定備份與還原 (防雲端重置)", expanded=False):
             st.caption("定期下載備份 JSON 檔。若雲端重置，上傳即可還原全部持倉與設定！")
             current_settings_json = json.dumps(cfg, ensure_ascii=False, indent=2)
@@ -357,7 +355,7 @@ def main() -> None:
             n_valid = sum(1 for s in res.setups if s.valid)
             st.caption(
                 f"共掃描 {len(res.setups)} 檔，符合買點 {n_valid} 檔｜"
-                f"🇺🇸 藍色 = USD 標的（已按 USD/CAD {fx_current:.4f} 換算）｜🇨🇦 紅色 = CAD 標的"
+                f"🇺🇸 藍色 = USD 標的｜🇨🇦 紅色 = CAD 標的（現價、支撐、停損、目標均以原幣顯示）"
             )
             cur_s = [("CAD" if (s.symbol.endswith(".TO") or s.symbol.endswith(".V")) else "USD") for s in res.setups]
             rows_s = []
@@ -367,11 +365,10 @@ def main() -> None:
                     "代號": s.symbol,
                     "原幣別": currency_badge(c),
                     "狀態": "✅ 符合" if s.valid else "⏳ 等待",
-                    "現價（原幣）": native_price_text(c, s.price, fx_current),
-                    "現價 (CAD)": None if math.isnan(s.price) else s.price,
-                    "支撐 (CAD)": s.support,
-                    "停損 (CAD)": s.stop,
-                    "目標 (CAD)": s.target,
+                    "現價（原幣）": native_price_text(c, s.price),
+                    "支撐（原幣）": native_price_text(c, s.support),
+                    "停損（原幣）": native_price_text(c, s.stop),
+                    "目標（原幣）": native_price_text(c, s.target),
                     "RRR": s.rrr,
                     "RSI": None if math.isnan(s.rsi) else s.rsi,
                     "建議股數": sz.shares if sz else None,
@@ -380,8 +377,7 @@ def main() -> None:
                     "說明": s.reason,
                 })
             fmt_s = {
-                "現價 (CAD)": "{:,.2f}", "支撐 (CAD)": "{:,.2f}", "停損 (CAD)": "{:,.2f}",
-                "目標 (CAD)": "{:,.2f}", "RRR": "{:.2f}", "RSI": "{:.1f}", "建議股數": "{:,.0f}",
+                "RRR": "{:.2f}", "RSI": "{:.1f}", "建議股數": "{:,.0f}",
                 "下單金額 (CAD)": "{:,.2f}", "最大虧損 (CAD)": "{:,.2f}",
             }
             sty_s = style_currency_cols(pd.DataFrame(rows_s), cur_s, ["原幣別", "現價（原幣）"], fmt_s)
