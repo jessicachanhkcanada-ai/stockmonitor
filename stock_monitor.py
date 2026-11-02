@@ -3,7 +3,7 @@
 """
 ==========================================================================
  股票與 ETF 智慧監控與風控助理 (後端引擎)
- 支援互惠基金、USD/CAD 匯率換算與持倉風控（支援原幣價格顯示）
+ 支援互惠基金、USD/CAD 匯率換算與持倉風控（買點掃描全面回傳原幣）
 ==========================================================================
 """
 
@@ -448,6 +448,7 @@ def scan_setups(account_size: float, risk_pct: float, alerts: list[Alert]) -> li
         stop_native = sup_price_native * (1 - STOP_BUFFER)
         tgt_native = tgt if tgt else price_native * 1.15
 
+        # 內部風控與 RRR 計算維持使用 CAD
         sup_price_cad = sup_price_native * fx_mult
         stop_cad = stop_native * fx_mult
         tgt_cad = tgt_native * fx_mult
@@ -478,6 +479,7 @@ def scan_setups(account_size: float, risk_pct: float, alerts: list[Alert]) -> li
         cur_s = "CAD" if is_cad else "USD"
         reason_text = f"回調至{sup_lbl} {money(cur_s, sup_price_native)}，RRR 達 {rrr:.2f}" if valid else f"目前價格未緊貼支撐或 RRR ({rrr:.2f}) 未達門檻"
 
+        # 這裡直接回傳「原幣」數值供前端顯示
         setups.append(BuySetup(
             symbol=sym, valid=valid, price=price_native, trigger=f"回調至{sup_lbl} {money(cur_s, sup_price_native)}",
             support=sup_price_native, stop=stop_native, target=tgt_native, rrr=rrr, reason=reason_text, rsi=r, sizing=sizing
@@ -639,7 +641,7 @@ def advise_holding(h: HoldingStatus, setup: Optional[BuySetup], account_size: fl
 
     if h.price >= h.target:
         return ("分批停利", "warn",
-                f"現價 {money(cur, p)} 已達目標價 {money(cur, t)}，可考慮分批賣出並上移停損")
+                    f"現價 {money(cur, p)} 已達目標價 {money(cur, t)}，可考慮分批賣出並上移停損")
 
     if w > max_pct and h.price > 0:
         trim = math.ceil((h.market_value - cap_val) / h.price / h.fx_mult)
